@@ -1,0 +1,28 @@
+/* colour slots shared by the usage strip, legend dots, row icons and share bars */
+.accent-0 { color: #3584e4; }
+.accent-1 { color: #2ec27e; }
+.accent-2 { color: #ff7800; }
+.accent-3 { color: #9141ac; }
+.accent-none { color: inherit; }
+
+.share progressbar trough,
+.share progressbar progress { min-height: 6px; border-radius: 3px; }
+.share progressbar trough { background-color: alpha(currentColor, 0.10); min-width: 40px; }
+.share.accent-0 progressbar progress { background-color: #3584e4; }
+.share.accent-1 progressbar progress { background-color: #2ec27e; }
+.share.accent-2 progressbar progress { background-color: #ff7800; }
+.share.accent-3 progressbar progress { background-color: #9141ac; }
+.share.accent-none progressbar progress { background-color: alpha(currentColor, 0.35); }
+
+.dot { min-width: 10px; min-height: 10px; border-radius: 5px; }
+.dot.accent-0 { background-color: #3584e4; }
+.dot.accent-1 { background-color: #2ec27e; }
+.dot.accent-2 { background-color: #ff7800; }
+.dot.accent-3 { background-color: #9141ac; }
+.dot.accent-none { background-color: alpha(currentColor, 0.30); }
+
+.numeric { font-feature-settings: "tnum"; }
+.side-size { font-size: 0.9em; }
+.contents-card { border-radius: 12px; }
+.contents-card columnview { background: transparent; }
+.folder-title { font-size: 1.6em; font-weight: 800; }

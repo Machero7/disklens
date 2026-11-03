@@ -16,6 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
+pub use crossbeam_channel::TryRecvError;
 
 use crate::tree::FileEntry;
 

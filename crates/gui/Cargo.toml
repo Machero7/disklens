@@ -1,0 +1,12 @@
+[package]
+name = "disklens"
+description = "DiskLens: see what's using your disk space (GTK4 + libadwaita)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+disklens-core = { path = "../core" }
+gtk = { package = "gtk4", version = "0.11", features = ["v4_18"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_6"] }
+libc = "0.2"
