@@ -1,0 +1,9 @@
+[package]
+name = "disklens-scan"
+description = "Headless DiskLens scanner (phase 0: totals + biggest files)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+disklens-core = { path = "../core" }

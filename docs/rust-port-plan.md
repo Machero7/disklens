@@ -1,6 +1,6 @@
 # DiskLens → Rust: port plan
 
-Status: plan, not started (2026-11-03). Python v1.1 (`disklens.py`) is the reference; its behaviour is the spec.
+Status: **phase 0 done** (2026-11-03): engine + `disklens-scan` CLI in `disklens-rs/`. Decisions: plain GTK, Python frozen during the port, remote scan after parity. Python v1.1 (`disklens.py`) is the reference; its behaviour is the spec.
 
 ## Goal
 Same app, same look, same features: a folder tree and a sortable contents list showing file and folder sizes, plus Biggest Files, File Types, File Ages, Treemap and Duplicates. It ships as one fast native binary. The Python version stays in git until the Rust one reaches parity.
@@ -42,6 +42,16 @@ disklens-rs/              (inside ~/claude, same repo)
 | 3 | Right-click menu (open, reveal, terminal, copy path, go to, rescan, Trash, with permanent delete only offered where Trash is unsupported), CSV export, hidden-files / size-on-disk / one-filesystem toggles, settings, keyboard shortcuts | Feature checklist vs Python ticks off |
 | 4 | Duplicates: size → hard-link collapse → BLAKE3 of head and tail 64 KB → full BLAKE3; marks, keep-one guard, progress, stop | The 5-case test set (copies, middle-differs, same-size-different, hard link, small files) gives identical results to Python |
 | 5 | `cargo build --release`, install to `~/.local/bin/disklens`, point the `.desktop` launcher at it, README | Parity confirmed by you; Python version kept in git as a fallback |
+
+## Phase 0 results (2026-11-03, ~, 953k files, warm cache)
+| | Python v1.1 engine | Rust engine |
+|---|---|---|
+| Scan time | 9.91 s | **0.38 s** (26×) |
+| Peak memory | 359 MB | **64 MB** (5.6×), tree itself 57 MB |
+| Biggest-files stats | — | 0.05 s |
+| Totals | match each other and `du -sb --apparent-size` (±live log growth) | |
+Cold-cache (first scan after boot) not measured, because dropping the page cache needs sudo. There the disk is the limit, so expect a smaller gain.
+8 unit/integration tests: totals, hard links counted once, 1 vs 32 threads identical, reset/rescan bookkeeping, unreadable folder, stats, `human`/`fmt_int`/`ext_of` incl. RAR-part grouping.
 
 ## Testing
 - `core` gets unit tests for scan totals on a generated tree, the duplicate cases, `squarify`, `ext_of`, and age buckets.
