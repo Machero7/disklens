@@ -11,6 +11,7 @@ Usage: disklens.py [PATH]
 import colorsys
 import concurrent.futures
 import csv
+import hashlib
 import heapq
 import json
 import os
@@ -28,7 +29,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("PangoCairo", "1.0")
 from gi.repository import Gtk, Gdk, GLib, Gio, GObject, Pango, PangoCairo
 
-VERSION = "1.0"
+VERSION = "1.1"
 APP_ID = "com.familjenhero.DiskLens"
 CONFIG_PATH = os.path.expanduser("~/.config/disklens/settings.json")
 SCAN_THREADS = 16
@@ -803,6 +804,153 @@ class Treemap(Gtk.DrawingArea):
         return True
 
 
+# ---------------------------------------------------------------- duplicates
+
+PARTIAL = 64 * 1024
+
+
+class DupFinder:
+    """Find identical files under a scanned folder.
+
+    same size -> drop hard links -> hash of first+last 64 KB -> full hash.
+    Files are only reported once their full contents match.
+    """
+
+    def __init__(self, node, min_size, threads=4):
+        self.node = node
+        self.min_size = min_size
+        self.threads = threads
+        self.lock = threading.Lock()
+        self.cancelled = False
+        self.finished = False
+        self.phase = "Collecting files"
+        self.done_files = self.total_files = 0
+        self.done_bytes = self.total_bytes = 0
+        self.errors = 0
+        self.groups = []      # [size, [(dirnode, file), ...]] sorted by reclaimable space
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def cancel(self):
+        self.cancelled = True
+
+    def _run(self):
+        try:
+            self.groups = self._find()
+        finally:
+            self.finished = True
+
+    def _regroup(self, groups, keyfn):
+        """Split each group by keyfn(member) (run in a thread pool); keep sub-groups of 2+."""
+        members = [(gi, m) for gi, g in enumerate(groups) for m in g]
+        self.total_files, self.done_files = len(members), 0
+        with concurrent.futures.ThreadPoolExecutor(self.threads) as ex:
+            keys = list(ex.map(lambda gm: keyfn(gm[1]), members))
+        out = {}
+        for (gi, m), k in zip(members, keys):
+            if k is not None:
+                out.setdefault((gi, k), []).append(m)
+        return [g for g in out.values() if len(g) > 1]
+
+    def _inode(self, m):
+        if self.cancelled:
+            return None
+        try:
+            st = os.stat(os.path.join(m[0].path, m[1][0]))
+            return (st.st_dev, st.st_ino)
+        except OSError:
+            self.errors += 1
+            return None
+        finally:
+            self.done_files += 1
+
+    def _partial(self, m):
+        if self.cancelled:
+            return None
+        size = m[1][1]
+        try:
+            h = hashlib.blake2b(digest_size=16)
+            with open(os.path.join(m[0].path, m[1][0]), "rb") as fh:
+                h.update(fh.read(PARTIAL))
+                if size > 2 * PARTIAL:
+                    fh.seek(size - PARTIAL)
+                    h.update(fh.read(PARTIAL))
+            return h.digest()
+        except OSError:
+            self.errors += 1
+            return None
+        finally:
+            self.done_files += 1
+
+    def _full(self, m):
+        size = m[1][1]
+        if size <= 2 * PARTIAL:      # the partial hash already covered the whole file
+            self.done_files += 1
+            return b"same"
+        try:
+            h = hashlib.blake2b(digest_size=32)
+            with open(os.path.join(m[0].path, m[1][0]), "rb") as fh:
+                while chunk := fh.read(1 << 20):
+                    if self.cancelled:
+                        return None
+                    h.update(chunk)
+                    with self.lock:
+                        self.done_bytes += len(chunk)
+            return h.digest()
+        except OSError:
+            self.errors += 1
+            return None
+        finally:
+            self.done_files += 1
+
+    def _find(self):
+        by_size, stack = {}, [self.node]
+        while stack:
+            d = stack.pop()
+            stack.extend(list(d.dirs))
+            for f in list(d.files):
+                if f[1] >= self.min_size and visible(f[0]):
+                    by_size.setdefault(f[1], []).append((d, f))
+        groups = [g for g in by_size.values() if len(g) > 1]
+
+        # hard links: keep one name per inode
+        self.phase = "Skipping hard links"
+        inode_groups = self._regroup(groups, self._inode)
+        linked = {id(m[1]) for g in inode_groups for m in g[1:]}
+        groups = [[m for m in g if id(m[1]) not in linked] for g in groups]
+        groups = [g for g in groups if len(g) > 1]
+        if self.cancelled:
+            return []
+
+        self.phase = "Comparing start and end of files"
+        groups = self._regroup(groups, self._partial)
+        if self.cancelled:
+            return []
+
+        self.phase = "Comparing full contents"
+        self.total_bytes = sum(m[1][1] for g in groups for m in g if m[1][1] > 2 * PARTIAL)
+        groups = self._regroup(groups, self._full)
+        if self.cancelled:
+            return []
+        groups = [[g[0][1][1], g] for g in groups]
+        groups.sort(key=lambda g: (len(g[1]) - 1) * g[0], reverse=True)
+        return groups
+
+
+class DupEntry(GObject.Object):
+    """A duplicate group (f is None, children = copies) or one copy inside a group."""
+    __gtype_name__ = "DiskLensDupEntry"
+    marked = GObject.Property(type=bool, default=False)
+
+    def __init__(self, size=0, parent=None, f=None):
+        super().__init__()
+        self.size = size
+        self.parent = parent
+        self.f = f
+        self.children = Gio.ListStore(item_type=DupEntry) if f is None else None
+
+
 # ---------------------------------------------------------------- context targets
 
 class Target:
@@ -859,6 +1007,9 @@ class DiskLensWindow(Gtk.ApplicationWindow):
         self.ctx_targets = []
         self._syncing = False
         self.all_errors = []
+        self.dup_finder = None
+        self.dup_groups = []
+        self.dup_marked = set()
 
         self._build_actions()
         self._build_header()
@@ -1091,6 +1242,7 @@ class DiskLensWindow(Gtk.ApplicationWindow):
         self.notebook.append_page(self.types_table.widget, Gtk.Label(label="File Types"))
         self.notebook.append_page(self.ages_table.widget, Gtk.Label(label="File Ages"))
         self.notebook.append_page(self.treemap, Gtk.Label(label="Treemap"))
+        self.notebook.append_page(self._build_dups(), Gtk.Label(label="Duplicates"))
         self.notebook.connect("switch-page", lambda *_: GLib.idle_add(self._refresh_page))
 
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL, vexpand=True,
@@ -1195,6 +1347,7 @@ class DiskLensWindow(Gtk.ApplicationWindow):
             self.alert("Can't scan that", str(e))
             return
         self.all_errors = []
+        self._dups_reset()
         self.tree_stores = {}
         self.contents = None
         self.current = None
@@ -1370,6 +1523,7 @@ class DiskLensWindow(Gtk.ApplicationWindow):
         self.contents_sort.set_model(store)
         self._update_crumbs()
         self._update_summary()
+        self._update_dup_where()
         if not from_tree:
             self._select_in_tree(node)
         if select_file is not None:
@@ -1606,6 +1760,7 @@ class DiskLensWindow(Gtk.ApplicationWindow):
         self.spinner.stop()
         for t in done:
             self._remove_from_model(t)
+        self._dups_prune(done)
         self.sync_views()
         self._update_status()
         self._refresh_page()
@@ -1671,6 +1826,269 @@ class DiskLensWindow(Gtk.ApplicationWindow):
                 store.remove(i)
                 return
 
+    # ---------- duplicates tab
+
+    def _build_dups(self):
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        top = Gtk.Box(spacing=8, margin_start=8, margin_end=8, margin_top=6, margin_bottom=6)
+        self.dup_where = Gtk.Label(xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.MIDDLE)
+        top.append(self.dup_where)
+        top.append(Gtk.Label(label="Min size (MB)"))
+        self.dup_min = Gtk.SpinButton.new_with_range(0, 100000, 1)
+        self.dup_min.set_value(self.settings.get("dup_min_mb", 1))
+        top.append(self.dup_min)
+        self.dup_btn = Gtk.Button(label="Find Duplicates", css_classes=["suggested-action"])
+        self.dup_btn.connect("clicked", lambda _b: self.dups_toggle())
+        top.append(self.dup_btn)
+        box.append(top)
+
+        self.dup_progress = Gtk.ProgressBar(show_text=True, visible=False, margin_start=8, margin_end=8)
+        box.append(self.dup_progress)
+
+        bar = Gtk.Box(spacing=6, margin_start=8, margin_end=8, margin_top=2, margin_bottom=6)
+        self.dup_summary = Gtk.Label(xalign=0, hexpand=True, css_classes=["dim-label"],
+                                     label="Finds files with identical contents under the selected folder.")
+        bar.append(self.dup_summary)
+        self.dup_action_btns = []
+        for label, cb in (("Mark All but Oldest", lambda: self.dups_mark("oldest")),
+                          ("Mark All but Newest", lambda: self.dups_mark("newest")),
+                          ("Clear Marks", lambda: self.dups_mark(None))):
+            b = Gtk.Button(label=label, sensitive=False)
+            b.connect("clicked", lambda _b, c=cb: c())
+            bar.append(b)
+            self.dup_action_btns.append(b)
+        self.dup_trash_btn = Gtk.Button(label="Move Marked to Trash", css_classes=["destructive-action"],
+                                        sensitive=False)
+        self.dup_trash_btn.connect("clicked", lambda _b: self.dups_trash_marked())
+        bar.append(self.dup_trash_btn)
+        box.append(bar)
+
+        self.dup_root = Gio.ListStore(item_type=DupEntry)
+        model = Gtk.TreeListModel.new(self.dup_root, False, True,
+                                      lambda e: e.children if e.f is None else None)
+        self.dup_view = Gtk.ColumnView(reorderable=False)
+        self.dup_view.add_css_class("data-table")
+
+        def col(title, setup, bind, width=None, expand=False):
+            f = Gtk.SignalListItemFactory()
+            f.connect("setup", lambda _f, li: li.set_child(setup()))
+
+            def _b(_f, li):
+                e = unwrap(li.get_item())
+                li.get_child()._dupentry = e
+                bind(li, e)
+            f.connect("bind", _b)
+            f.connect("unbind", _unbind)
+            c = Gtk.ColumnViewColumn.new(title, f)
+            c.set_resizable(True)
+            c.set_expand(expand)
+            if width:
+                c.set_fixed_width(width)
+            self.dup_view.append_column(c)
+
+        def bind_mark(li, e):
+            chk = li.get_child()
+            chk.set_visible(e.f is not None)
+            chk._binds = [e.bind_property("marked", chk, "active",
+                                          GObject.BindingFlags.SYNC_CREATE | GObject.BindingFlags.BIDIRECTIONAL)]
+        col("", Gtk.CheckButton, bind_mark, width=36)
+
+        def setup_name():
+            exp = Gtk.TreeExpander()
+            exp.set_child(Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE))
+            return exp
+
+        def bind_name(li, e):
+            exp = li.get_child()
+            exp.set_list_row(li.get_item())
+            lab = exp.get_child()
+            if e.f is None:
+                n = e.children.get_n_items()
+                lab.set_label(f"{n} identical files")
+                lab.add_css_class("heading")
+            else:
+                lab.set_label(e.f[0])
+                lab.remove_css_class("heading")
+        col("Name", setup_name, bind_name, expand=True)
+
+        def text_col(title, fn, width, xalign=1.0):
+            def setup():
+                lab = Gtk.Label(xalign=xalign, ellipsize=Pango.EllipsizeMode.MIDDLE)
+                lab.add_css_class("numeric")
+                return lab
+            col(title, setup, lambda li, e: li.get_child().set_label(fn(e)), width=width)
+
+        text_col("Size", lambda e: human(e.size), 90)
+        text_col("Reclaimable", lambda e: human((e.children.get_n_items() - 1) * e.size) if e.f is None else "",
+                 110)
+        text_col("Folder", lambda e: self._rel(e.parent) if e.f is not None else "", 320, xalign=0)
+        text_col("Modified", lambda e: fmt_time(e.f[3]) if e.f is not None else "", 135)
+
+        self.dup_view.set_model(Gtk.SingleSelection(model=model, autoselect=False))
+        self.dup_view.connect("activate", self._on_dup_activate)
+        self._attach_context(self.dup_view, self._dup_targets)
+        box.append(Gtk.ScrolledWindow(child=self.dup_view, vexpand=True))
+        return box
+
+    def _dup_entry_at(self, x, y):
+        w = self.dup_view.pick(x, y, Gtk.PickFlags.DEFAULT)
+        while w is not None and w is not self.dup_view:
+            e = getattr(w, "_dupentry", None)
+            if e is not None:
+                return e
+            w = w.get_parent()
+        return None
+
+    def _dup_targets(self, x, y):
+        e = self._dup_entry_at(x, y)
+        return [Target(parent=e.parent, f=e.f)] if e is not None and e.f is not None else None
+
+    def _on_dup_activate(self, view, pos):
+        e = unwrap(view.get_model().get_item(pos))
+        if e is not None and e.f is not None:
+            self.show_folder(e.parent, select_file=e.f)
+
+    def _update_dup_where(self):
+        if self.current is not None and self.dup_finder is None:
+            self.dup_where.set_label(f"Search in: {self.current.path}")
+
+    def dups_toggle(self):
+        if self.dup_finder is not None and not self.dup_finder.finished:
+            self.dup_finder.cancel()
+            return
+        if self.current is None:
+            return
+        if self.scanning:
+            self.alert("Scan in progress", "Wait for the scan to finish before looking for duplicates.")
+            return
+        mb = self.dup_min.get_value()
+        self.settings["dup_min_mb"] = mb
+        self.dup_where.set_label(f"Searching in: {self.current.path}")
+        self._dups_set_results([])
+        self.dup_finder = DupFinder(self.current, int(mb * 1024 * 1024))
+        self.dup_finder.start()
+        self.dup_btn.set_label("Stop")
+        self.dup_btn.remove_css_class("suggested-action")
+        self.dup_progress.set_visible(True)
+        GLib.timeout_add(250, self._dup_tick)
+
+    def _dup_tick(self):
+        df = self.dup_finder
+        if df is None:
+            return False
+        if df.phase == "Comparing full contents" and df.total_bytes:
+            frac = df.done_bytes / df.total_bytes
+            text = f"{df.phase}: {human(df.done_bytes)} of {human(df.total_bytes)}"
+        elif df.total_files:
+            frac = df.done_files / df.total_files
+            text = f"{df.phase}: {fmt_int(df.done_files)} of {fmt_int(df.total_files)} files"
+        else:
+            frac, text = 0.0, df.phase + "…"
+        self.dup_progress.set_fraction(min(1.0, frac))
+        self.dup_progress.set_text(text)
+        if not df.finished:
+            return True
+        self.dup_btn.set_label("Find Duplicates")
+        self.dup_btn.add_css_class("suggested-action")
+        self.dup_progress.set_visible(False)
+        self.dup_marked = set()
+        if df.cancelled:
+            self.dup_summary.set_label("Stopped.")
+        else:
+            self._dups_set_results(df.groups)
+            if df.errors:
+                self.dup_summary.set_label(self.dup_summary.get_label() + f" · {df.errors} unreadable files skipped")
+        self.dup_finder = None
+        self._update_dup_where()
+        return False
+
+    def _dups_set_results(self, groups):
+        self.dup_groups = groups
+        entries = []
+        for size, members in groups:
+            g = DupEntry(size=size)
+            kids = []
+            for d, f in members:
+                e = DupEntry(size=size, parent=d, f=f)
+                e.props.marked = id(f) in self.dup_marked
+                e.connect("notify::marked", self._on_dup_marked)
+                kids.append(e)
+            g.children.splice(0, 0, kids)
+            entries.append(g)
+        self.dup_root.splice(0, self.dup_root.get_n_items(), entries)
+        reclaim = sum((len(m) - 1) * size for size, m in groups)
+        copies = sum(len(m) for _, m in groups)
+        if groups:
+            self.dup_summary.set_label(f"{fmt_int(len(groups))} groups · {fmt_int(copies)} files · "
+                                       f"{human(reclaim)} reclaimable")
+        elif self.dup_finder is not None and self.dup_finder.finished:
+            self.dup_summary.set_label("No duplicates found.")
+        for b in self.dup_action_btns:
+            b.set_sensitive(bool(groups))
+        self._update_dup_trash_btn()
+
+    def _on_dup_marked(self, e, _pspec):
+        if e.props.marked:
+            self.dup_marked.add(id(e.f))
+        else:
+            self.dup_marked.discard(id(e.f))
+        self._update_dup_trash_btn()
+
+    def _update_dup_trash_btn(self):
+        n = sum(1 for _, m in self.dup_groups for _, f in m if id(f) in self.dup_marked)
+        size = sum(s for s, m in self.dup_groups for _, f in m if id(f) in self.dup_marked)
+        self.dup_trash_btn.set_sensitive(n > 0)
+        self.dup_trash_btn.set_label(f"Move {n} Marked to Trash ({human(size)})" if n else "Move Marked to Trash")
+
+    def dups_mark(self, keep):
+        for i in range(self.dup_root.get_n_items()):
+            g = self.dup_root.get_item(i)
+            kids = [g.children.get_item(j) for j in range(g.children.get_n_items())]
+            if keep is None:
+                for e in kids:
+                    e.props.marked = False
+                continue
+            kids.sort(key=lambda e: (e.f[3], e.parent.path, e.f[0]), reverse=(keep == "newest"))
+            for idx, e in enumerate(kids):
+                e.props.marked = idx > 0
+
+    def dups_trash_marked(self):
+        targets, all_marked = [], 0
+        for _size, members in self.dup_groups:
+            marked = [(d, f) for d, f in members if id(f) in self.dup_marked]
+            if marked and len(marked) == len(members):
+                all_marked += 1
+                continue
+            targets += [Target(parent=d, f=f) for d, f in marked]
+        if all_marked:
+            self.alert("Every copy is marked",
+                       f"In {all_marked} group(s) all copies are marked. Unmark at least one copy in each "
+                       f"group so one stays.")
+            return
+        if targets:
+            self.trash(targets)
+
+    def _dups_prune(self, done):
+        if not self.dup_groups:
+            return
+        gone_files = {id(t.f) for t in done if not t.is_dir}
+        gone_dirs = [t.node for t in done if t.is_dir]
+        groups = []
+        for size, members in self.dup_groups:
+            keep = [(d, f) for d, f in members
+                    if id(f) not in gone_files and not any(d.is_inside(g) for g in gone_dirs)]
+            if len(keep) > 1:
+                groups.append([size, keep])
+        self.dup_marked -= gone_files
+        self._dups_set_results(groups)
+
+    def _dups_reset(self):
+        if self.dup_finder is not None:
+            self.dup_finder.cancel()
+        self.dup_marked = set()
+        self._dups_set_results([])
+        self.dup_summary.set_label("Finds files with identical contents under the selected folder.")
+
     def export_csv(self):
         if self.contents is None:
             return
@@ -1730,6 +2148,7 @@ class DiskLensWindow(Gtk.ApplicationWindow):
             "width": self.get_width(), "height": self.get_height(),
             "pane": self.paned.get_position(),
             "ondisk": STATE["ondisk"], "hidden": STATE["hidden"], "onefs": STATE["onefs"],
+            "dup_min_mb": self.dup_min.get_value(),
         })
         save_settings(self.settings)
         return False
