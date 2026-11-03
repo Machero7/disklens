@@ -1,6 +1,6 @@
 # DiskLens → Rust: port plan
 
-Status: **phase 0 done** (2026-11-03): engine + `disklens-scan` CLI in `disklens-rs/`. Decisions: plain GTK, Python frozen during the port, remote scan after parity. Python v1.1 (`disklens.py`) is the reference; its behaviour is the spec.
+Status: **phase 0 done** (2026-11-03): engine + `disklens-scan` CLI in `disklens-rs/`. Decisions: **libadwaita, full modern GNOME redesign** (user, 2026-11-03; libadwaita-1-dev 1.9.1 installed), Python frozen during the port, remote scan after parity. Python v1.1 (`disklens.py`) is the reference; its behaviour is the spec.
 
 ## Goal
 Same app, same look, same features: a folder tree and a sortable contents list showing file and folder sizes, plus Biggest Files, File Types, File Ages, Treemap and Duplicates. It ships as one fast native binary. The Python version stays in git until the Rust one reaches parity.
@@ -15,7 +15,7 @@ Same app, same look, same features: a folder tree and a sortable contents list s
 | Distribution | python3 + PyGObject | one binary in `~/.local/bin` |
 
 ## Stack
-- **gtk4-rs 0.11** (GTK 4.22 installed; `rustc` 1.93 / `cargo` from the distro already present). Plain GTK, like today: no libadwaita, so no sudo installs needed.
+- **gtk4-rs 0.11 + libadwaita-rs 0.9** (GTK 4.22, libadwaita 1.9.1 installed; `rustc` 1.93 / `cargo` from the distro).
 - cairo-rs + pangocairo for the treemap.
 - Scanner: our own work-stealing pool (`crossbeam-deque`, or `rayon::scope`) over `std::fs::read_dir` and `symlink_metadata`. Results go to the UI over `async-channel`, with `glib::timeout_add_local` ticking every 500 ms, as in Python.
 - `blake3` for duplicate hashing, `serde`/`serde_json` for settings. Settings stay in the same `~/.config/disklens/settings.json`, so both versions share them.
@@ -42,6 +42,19 @@ disklens-rs/              (inside ~/claude, same repo)
 | 3 | Right-click menu (open, reveal, terminal, copy path, go to, rescan, Trash, with permanent delete only offered where Trash is unsupported), CSV export, hidden-files / size-on-disk / one-filesystem toggles, settings, keyboard shortcuts | Feature checklist vs Python ticks off |
 | 4 | Duplicates: size → hard-link collapse → BLAKE3 of head and tail 64 KB → full BLAKE3; marks, keep-one guard, progress, stop | The 5-case test set (copies, middle-differs, same-size-different, hard link, small files) gives identical results to Python |
 | 5 | `cargo build --release`, install to `~/.local/bin/disklens`, point the `.desktop` launcher at it, README | Parity confirmed by you; Python version kept in git as a fallback |
+
+## Design (libadwaita, decided 2026-11-03)
+- AdwApplicationWindow + AdwToolbarView; header bar with AdwViewSwitcher (Contents, Biggest, Types, Ages, Map, Duplicates, each with an icon). On narrow widths, an AdwBreakpoint moves the switcher to a bottom AdwViewSwitcherBar and collapses the sidebar.
+- AdwOverlaySplitView: the folder tree as a toggleable navigation sidebar.
+- Folder header: big title + "size · files · folders" + a stacked usage strip of the top children (colors shared with the list rows' bars and icons).
+- Contents: ColumnView in a rounded card, rounded per-item colored bars, relative dates ("Today", "2 days ago").
+- Start screen: AdwStatusPage + boxed list of drives (AdwActionRow + usage bar) + "Choose folder" pill.
+- Scanning: thin progress line under the header, AdwSpinner, Stop button, live counts in the AdwWindowTitle subtitle.
+- AdwToastOverlay: "Moved N items to Trash" + **Undo** (restore from trash:/// via trash::orig-path).
+- AdwAlertDialog (destructive appearance), AdwPreferencesDialog (size on disk, hidden, one filesystem, dup min size, theme System/Light/Dark), AdwAboutDialog, AdwShortcutsDialog (Ctrl+?).
+- New: Ctrl+F search/filter in the current folder.
+- Treemap: rounded tiles with gaps, GNOME palette, follows light/dark.
+- Phase 1 starts with a runnable look-and-feel prototype for user approval before filling in features.
 
 ## Phase 0 results (2026-11-03, ~, 953k files, warm cache)
 | | Python v1.1 engine | Rust engine |
