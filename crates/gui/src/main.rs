@@ -4,6 +4,7 @@
 //!        disklens --shots DIR PATH   (scripted walk-through that saves PNG screenshots)
 
 mod mounts;
+mod pages;
 mod row;
 mod window;
 
@@ -83,6 +84,13 @@ fn selftest(st: Rc<window::State>, dir: PathBuf, path: PathBuf) {
         (100, Box::new(move |s| { s.start_scan(path.clone()); true })),
         (300, Box::new(|s| !s.is_scanning())),
         (700, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r1_main"); true }) }),
+        (100, Box::new(|s| { s.set_page("biggest"); true })),
+        (700, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r2b_biggest"); true }) }),
+        (100, Box::new(|s| { s.set_page("types"); true })),
+        (700, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r2c_types"); true }) }),
+        (100, Box::new(|s| { s.set_page("ages"); true })),
+        (700, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r2d_ages"); true }) }),
+        (100, Box::new(|s| { s.set_page("contents"); true })),
         (100, Box::new(|s| {
             if let Some(c) = s.biggest_child_dir() {
                 s.show_folder(c, false);

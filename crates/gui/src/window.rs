@@ -14,6 +14,7 @@ use disklens_core::{Tree, NONE};
 use gtk::{gio, glib};
 
 use crate::mounts;
+use crate::pages::Pages;
 use crate::row::RowObject;
 
 /// Same colours as `.accent-N` in style.css, for the cairo-drawn usage strip.
@@ -51,6 +52,7 @@ pub struct Ui {
     stop_btn: gtk::Button,
     rescan_btn: gtk::Button,
     up_btn: gtk::Button,
+    pages: Pages,
 }
 
 struct Contents {
@@ -82,6 +84,9 @@ pub struct State {
     ticking: Cell<bool>,
     tick_n: Cell<u64>,
     last_scan: RefCell<String>,
+    /// The stats pages need recomputing; time (µs) they were last filled.
+    stats_dirty: Cell<bool>,
+    stats_at: Cell<i64>,
 }
 
 fn visible(state: &State, name: &[u8]) -> bool {
@@ -227,13 +232,14 @@ pub fn build(app: &adw::Application) -> Rc<State> {
     contents_page.append(&header);
     contents_page.append(&contents_scroll);
 
-    view_stack.add_titled_with_icon(&contents_page, Some("contents"), "Contents", "folder-symbolic");
+    view_stack.add_titled_with_icon(&contents_page, Some("contents"), "Folder", "folder-symbolic");
+    let pages = Pages::new();
+    view_stack.add_titled_with_icon(&pages.biggest.widget, Some("biggest"), "Biggest", "view-sort-descending-symbolic");
+    view_stack.add_titled_with_icon(&pages.types.widget, Some("types"), "Types", "text-x-generic-symbolic");
+    view_stack.add_titled_with_icon(&pages.ages.widget, Some("ages"), "Ages", "document-open-recent-symbolic");
     for (name, title, icon) in [
-        ("biggest", "Biggest", "view-sort-descending-symbolic"),
-        ("types", "Types", "text-x-generic-symbolic"),
-        ("ages", "Ages", "document-open-recent-symbolic"),
         ("map", "Map", "view-grid-symbolic"),
-        ("dupes", "Duplicates", "edit-copy-symbolic"),
+        ("dupes", "Copies", "edit-copy-symbolic"),
     ] {
         let placeholder = adw::StatusPage::builder()
             .icon_name(icon)
@@ -278,6 +284,11 @@ pub fn build(app: &adw::Application) -> Rc<State> {
             bp.add_setter(&col, "visible", Some(&false.to_value()));
         }
     }
+    for page in [&pages.biggest, &pages.types, &pages.ages] {
+        for col in &page.narrow_hide {
+            bp.add_setter(col, "visible", Some(&false.to_value()));
+        }
+    }
     window.add_breakpoint(bp);
 
     let ui = Ui {
@@ -302,6 +313,7 @@ pub fn build(app: &adw::Application) -> Rc<State> {
         stop_btn,
         rescan_btn,
         up_btn,
+        pages,
     };
     let state = Rc::new(State {
         ui,
@@ -325,6 +337,8 @@ pub fn build(app: &adw::Application) -> Rc<State> {
         ticking: Cell::new(false),
         tick_n: Cell::new(0),
         last_scan: RefCell::new(String::new()),
+        stats_dirty: Cell::new(true),
+        stats_at: Cell::new(0),
     });
     wire(&state, &drive_pop);
     state
@@ -371,13 +385,13 @@ fn side_factory() -> gtk::SignalListItemFactory {
     f
 }
 
-fn sorter(cmp: impl Fn(&RowObject, &RowObject) -> std::cmp::Ordering + 'static) -> gtk::CustomSorter {
+pub(crate) fn sorter(cmp: impl Fn(&RowObject, &RowObject) -> std::cmp::Ordering + 'static) -> gtk::CustomSorter {
     gtk::CustomSorter::new(move |a, b| {
         cmp(a.downcast_ref::<RowObject>().unwrap(), b.downcast_ref::<RowObject>().unwrap()).into()
     })
 }
 
-fn label_cell(prop: &'static str, xalign: f32, dim: bool) -> gtk::SignalListItemFactory {
+pub(crate) fn label_cell(prop: &'static str, xalign: f32, dim: bool) -> gtk::SignalListItemFactory {
     let f = gtk::SignalListItemFactory::new();
     f.connect_setup(move |_, obj| {
         let li = obj.downcast_ref::<gtk::ListItem>().unwrap();
@@ -392,8 +406,8 @@ fn label_cell(prop: &'static str, xalign: f32, dim: bool) -> gtk::SignalListItem
     f
 }
 
-fn add_contents_columns(view: &gtk::ColumnView) {
-    // Name: coloured icon + name
+/// Name cell: coloured icon + name.
+pub(crate) fn name_cell() -> gtk::SignalListItemFactory {
     let name_f = gtk::SignalListItemFactory::new();
     name_f.connect_setup(|_, obj| {
         let li = obj.downcast_ref::<gtk::ListItem>().unwrap();
@@ -410,7 +424,11 @@ fn add_contents_columns(view: &gtk::ColumnView) {
         item.chain_property::<RowObject>("accent").bind(&wrap, "css-classes", gtk::Widget::NONE);
         item.chain_property::<RowObject>("name").bind(&name, "label", gtk::Widget::NONE);
     });
-    // Share: coloured rounded bar + percentage
+    name_f
+}
+
+/// Share cell: coloured rounded bar + percentage.
+pub(crate) fn share_cell() -> gtk::SignalListItemFactory {
     let share_f = gtk::SignalListItemFactory::new();
     share_f.connect_setup(|_, obj| {
         let li = obj.downcast_ref::<gtk::ListItem>().unwrap();
@@ -440,7 +458,11 @@ fn add_contents_columns(view: &gtk::ColumnView) {
         )
         .bind(&wrap, "css-classes", gtk::Widget::NONE);
     });
+    share_f
+}
 
+fn add_contents_columns(view: &gtk::ColumnView) {
+    let (name_f, share_f) = (name_cell(), share_cell());
     let cols: [(&str, gtk::SignalListItemFactory, gtk::CustomSorter, i32, bool); 6] = [
         ("Name", name_f, sorter(|a, b| a.sort_name().cmp(&b.sort_name())), 0, true),
         ("Size", label_cell("size-text", 1.0, false), sorter(|a, b| a.size().cmp(&b.size())), 95, false),
@@ -522,6 +544,21 @@ fn wire(state: &Rc<State>, drive_pop: &gtk::Popover) {
                 tree.file_path(row.dir(), &d.files[i as usize])
             };
             let _ = gio::AppInfo::launch_default_for_uri(&gio::File::for_path(path).uri(), None::<&gio::AppLaunchContext>);
+        }
+    });
+
+    // Biggest: activating a file opens its folder in Contents
+    let w = weak.clone();
+    ui.pages.biggest.view.connect_activate(move |_, pos| {
+        let Some(st) = w.upgrade() else { return };
+        let Some(row) = st.ui.pages.biggest.sorted.item(pos).and_downcast::<RowObject>() else { return };
+        st.show_folder(row.dir(), false);
+        st.set_page("contents");
+    });
+    let w = weak.clone();
+    ui.view_stack.connect_visible_child_name_notify(move |_| {
+        if let Some(st) = w.upgrade() {
+            st.refresh_stats(true);
         }
     });
 
@@ -902,6 +939,27 @@ impl State {
         if !from_side {
             self.select_in_side(dir);
         }
+        self.stats_dirty.set(true);
+        self.refresh_stats(true);
+    }
+
+    /// Refill Biggest/Types/Ages if one is showing and the data changed.
+    /// `now_ok=false` (live scan updates) limits refills to about once a second.
+    fn refresh_stats(&self, now_ok: bool) {
+        let page = self.ui.view_stack.visible_child_name().unwrap_or_default();
+        if !Pages::is_stats_page(&page) || !self.stats_dirty.get() || self.current.get() == NONE {
+            return;
+        }
+        let t = glib::monotonic_time();
+        if !now_ok && t - self.stats_at.get() < 1_000_000 {
+            return;
+        }
+        self.stats_dirty.set(false);
+        let tree = self.tree.borrow();
+        let kind = |name: &str| self.kind(name);
+        self.ui.pages.fill(&tree, self.current.get(), self.ondisk.get(), self.show_hidden.get(), now(), &kind);
+        // measured after filling, so a slow fill can't hog the main loop during a scan
+        self.stats_at.set(glib::monotonic_time());
     }
 
     fn go_up(self: &Rc<Self>) {
@@ -1023,6 +1081,8 @@ impl State {
         if at_top && self.ui.contents_sort.n_items() > 0 {
             self.ui.contents_view.scroll_to(0, None, gtk::ListScrollFlags::NONE, None);
         }
+        self.stats_dirty.set(true);
+        self.refresh_stats(self.scanner.borrow().is_none());
     }
 
     /// Hidden-files toggle: rebuild the sidebar and Contents from scratch.

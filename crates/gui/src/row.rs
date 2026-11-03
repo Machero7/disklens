@@ -31,6 +31,9 @@ mod imp {
         pub mtime_text: RefCell<String>,
         #[property(get, set)]
         pub kind_text: RefCell<String>,
+        /// Extra text column: containing folder (Biggest) or extension (Types).
+        #[property(get, set)]
+        pub detail: RefCell<String>,
         #[property(get, set, nullable)]
         pub gicon: RefCell<Option<gio::Icon>>,
         /// CSS classes for the accent wrapper around the icon and bar ("accent-0".."accent-3", "accent-none").
@@ -98,6 +101,33 @@ impl RowObject {
         r
     }
 
+    /// A file row whose share is measured against `share_of` (an ancestor folder).
+    pub fn for_file_in(tree: &Tree, dir: u32, idx: u32, share_of: u32, kind: (String, gio::Icon), ondisk: bool, now: i64) -> Self {
+        let r = Self::for_file(tree, dir, idx, kind, ondisk, now);
+        r.imp().parent.set(share_of);
+        r.imp().cache.set(None);
+        r.refresh(tree, ondisk, now);
+        r
+    }
+
+    /// A summary row not tied to the tree (a file type or an age group). `order` keeps its natural position.
+    #[allow(clippy::too_many_arguments)]
+    pub fn summary(name: &str, detail: &str, icon: &str, size: u64, total: u64, count: u64, order: i64) -> Self {
+        let r = Self::blank(NONE, NONE, NONE, name.to_string());
+        let imp = r.imp();
+        imp.sort_size.set(size);
+        imp.sort_files.set(count as i64);
+        imp.sort_mtime.set(order);
+        let frac = if total > 0 { size as f64 / total as f64 } else { 0.0 };
+        r.set_detail(detail);
+        r.set_gicon(Some(gio::ThemedIcon::new(icon).upcast::<gio::Icon>()));
+        r.set_size_text(human(size));
+        r.set_fraction(frac.min(1.0));
+        r.set_pct_text(format!("{:.1} %", frac * 100.0));
+        r.set_files_text(fmt_int(count));
+        r
+    }
+
     pub fn is_dir(&self) -> bool {
         self.imp().file.get() == NONE
     }
@@ -130,6 +160,9 @@ impl RowObject {
 
     pub fn refresh(&self, tree: &Tree, ondisk: bool, now: i64) {
         let imp = self.imp();
+        if imp.dir.get() == NONE {
+            return; // summary row
+        }
         let (v, nfiles, mtime, error) = match self.file_index() {
             None => {
                 let d = tree.get(imp.dir.get());
