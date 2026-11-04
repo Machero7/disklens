@@ -7,6 +7,7 @@ mod mounts;
 mod pages;
 mod treemap;
 mod row;
+mod settings;
 mod window;
 
 use std::path::{Path, PathBuf};
@@ -50,6 +51,7 @@ fn main() -> glib::ExitCode {
         let keep = st.clone();
         st.ui.window.connect_close_request(move |_| {
             keep.cancel_scan();
+            keep.save_settings();
             glib::Propagation::Proceed
         });
         st.ui.window.present();
@@ -99,6 +101,22 @@ fn selftest(st: Rc<window::State>, dir: PathBuf, path: PathBuf) {
         (100, Box::new(|s| { gtk::prelude::WidgetExt::activate_action(&s.ui.window, "win.undo", None).ok(); true })),
         (300, Box::new(|s| !s.is_scanning())),
         (900, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r3d_undone"); true }) }),
+        (100, { let d = dir.clone(); Box::new(move |s| {
+            match s.export_contents_to(&d.join("contents.csv")) {
+                Ok(n) => println!("csv {n} rows"),
+                Err(e) => println!("csv failed: {e}"),
+            }
+            s.show_preferences();
+            true
+        }) }),
+        (700, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r3e_prefs"); true }) }),
+        (100, Box::new(|s| {
+            if let Some(d) = s.ui.window.visible_dialog() { d.force_close(); }
+            s.show_shortcuts();
+            s.save_settings();
+            true
+        })),
+        (1500, Box::new(|s| { for w in gtk::Window::list_toplevels() { if let Ok(w) = w.downcast::<gtk::Window>() { if w != *s.ui.window.upcast_ref::<gtk::Window>() { w.close(); } } } true })),
         (100, Box::new(|s| { s.set_page("biggest"); true })),
         (700, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r2b_biggest"); true }) }),
         (100, Box::new(|s| { s.set_page("types"); true })),

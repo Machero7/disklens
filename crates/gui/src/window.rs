@@ -15,11 +15,14 @@ use gtk::{gio, glib};
 
 #[path = "actions.rs"]
 mod actions;
+#[path = "extras.rs"]
+mod extras;
 
 use crate::mounts;
 use crate::pages::Pages;
 use crate::treemap;
 use crate::row::RowObject;
+use crate::settings::Settings;
 
 /// Same colours as `.accent-N` in style.css, for the cairo-drawn usage strip.
 const ACCENTS: [(f64, f64, f64); 4] = [
@@ -103,6 +106,7 @@ pub struct State {
     /// Last trashed paths and their folders, for Undo / Ctrl+Z.
     last_trash: RefCell<Option<(Vec<PathBuf>, Vec<u32>)>>,
     trash_toast: RefCell<Option<adw::Toast>>,
+    settings: RefCell<Settings>,
 }
 
 fn visible(state: &State, name: &[u8]) -> bool {
@@ -112,11 +116,12 @@ fn visible(state: &State, name: &[u8]) -> bool {
 // ------------------------------------------------------------------ construction
 
 pub fn build(app: &adw::Application) -> Rc<State> {
+    let settings = Settings::load();
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("DiskLens")
-        .default_width(1320)
-        .default_height(820)
+        .default_width(settings.int("width", 1320).clamp(360, 10_000) as i32)
+        .default_height(settings.int("height", 820).clamp(400, 10_000) as i32)
         .width_request(360)
         .height_request(400)
         .build();
@@ -363,9 +368,9 @@ pub fn build(app: &adw::Application) -> Rc<State> {
         legend_key: RefCell::new(String::new()),
         kinds: RefCell::new(HashMap::new()),
         errors: RefCell::new(Vec::new()),
-        ondisk: Cell::new(false),
-        show_hidden: Cell::new(true),
-        one_fs: Cell::new(true),
+        ondisk: Cell::new(settings.bool("ondisk", false)),
+        show_hidden: Cell::new(settings.bool("hidden", true)),
+        one_fs: Cell::new(settings.bool("onefs", true)),
         syncing: Cell::new(false),
         ticking: Cell::new(false),
         tick_n: Cell::new(0),
@@ -379,23 +384,29 @@ pub fn build(app: &adw::Application) -> Rc<State> {
         ctx_targets: RefCell::new(Vec::new()),
         last_trash: RefCell::new(None),
         trash_toast: RefCell::new(None),
+        settings: RefCell::new(settings),
     });
     wire(&state, &drive_pop);
     actions::set_current(&state);
     actions::add_actions(&state);
     actions::attach_map_ctx(&state);
+    extras::add_actions(&state);
     state
 }
 
 fn menu_button() -> gtk::MenuButton {
     let menu = gio::Menu::new();
     let view = gio::Menu::new();
-    view.append(Some("Show size on disk"), Some("win.ondisk"));
-    view.append(Some("Show hidden files"), Some("win.hidden"));
-    view.append(Some("Stay on one filesystem"), Some("win.onefs"));
+    view.append(Some("Show Size on Disk"), Some("win.ondisk"));
+    view.append(Some("Show Hidden Files"), Some("win.hidden"));
     menu.append_section(None, &view);
+    let files = gio::Menu::new();
+    files.append(Some("Scan Folder…"), Some("win.open"));
+    files.append(Some("Export to CSV…"), Some("win.export"));
+    menu.append_section(None, &files);
     let other = gio::Menu::new();
-    other.append(Some("Scan folder…"), Some("win.open"));
+    other.append(Some("Preferences"), Some("win.preferences"));
+    other.append(Some("Keyboard Shortcuts"), Some("win.shortcuts"));
     other.append(Some("About DiskLens"), Some("win.about"));
     menu.append_section(None, &other);
     gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu).primary(true).build()
@@ -735,15 +746,16 @@ fn wire(state: &Rc<State>, drive_pop: &gtk::Popover) {
         });
         win.add_action(&a);
     };
-    toggle("ondisk", false, Box::new(|st, v| {
+    let (ondisk, hidden, onefs) = (state.ondisk.get(), state.show_hidden.get(), state.one_fs.get());
+    toggle("ondisk", ondisk, Box::new(|st, v| {
         st.ondisk.set(v);
         st.sync_views();
     }));
-    toggle("hidden", true, Box::new(|st, v| {
+    toggle("hidden", hidden, Box::new(|st, v| {
         st.show_hidden.set(v);
         st.rebuild_views();
     }));
-    toggle("onefs", true, Box::new(|st, v| st.one_fs.set(v)));
+    toggle("onefs", onefs, Box::new(|st, v| st.one_fs.set(v)));
 }
 
 // ------------------------------------------------------------------ behaviour
