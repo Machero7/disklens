@@ -1,7 +1,11 @@
-# DiskLens (Rust)
+# DiskLens
 
-See what's using your disk space. A GNOME app (GTK 4 + libadwaita) and the Rust rewrite
-of `../disklens.py`: one native program, about 26× faster to scan and using about 1/6 of the memory.
+See what's using your disk space. A GNOME app (GTK 4 + libadwaita) for Linux, in the spirit of
+TreeSize: folder sizes, biggest files, file types and ages, a treemap, a duplicate finder,
+and scanning a NAS over SSH.
+
+It's written in Rust: one native program, about 26× faster to scan than the original Python
+version (`python/disklens.py`) and using about 1/6 of the memory.
 
 ## Install
 
@@ -9,13 +13,15 @@ Needs Rust plus the GTK 4 and libadwaita development files
 (Fedora: `sudo dnf install gtk4-devel libadwaita-devel`).
 
 ```bash
+git clone https://github.com/Machero7/disklens.git ~/disklens
+cd ~/disklens
 ./install.sh              # build, install to ~/.local/bin, add "DiskLens" to the app grid
 ./install.sh --uninstall  # remove it and restore the old launchers
 ```
 
 The installer moves older DiskLens launchers (the Python one and "DiskLens Preview") to
 `~/.local/share/disklens-old-launchers/`. The Python version still works with
-`python3 ~/claude/disklens.py`.
+`python3 python/disklens.py`.
 
 ## What it does
 
