@@ -38,6 +38,8 @@ fn main() -> glib::ExitCode {
         .flags(gio::ApplicationFlags::NON_UNIQUE)
         .build();
     app.connect_startup(|_| {
+        // installed by install.sh; falls back to the theme's generic icon if missing
+        gtk::Window::set_default_icon_name(APP_ID);
         let css = gtk::CssProvider::new();
         css.load_from_string(include_str!("style.css"));
         gtk::style_context_add_provider_for_display(
@@ -80,12 +82,23 @@ fn shot(st: &window::State, dir: &Path, name: &str) {
 type Step = Box<dyn Fn(&Rc<window::State>) -> bool>;
 
 /// Scan, open the biggest folder, switch to dark and narrow layouts; screenshot each.
+/// Created inside the scanned folder by the walk-through and removed at the end.
+const SELFTEST_DIR: &str = "disklens-walkthrough-test";
+
 fn selftest(st: Rc<window::State>, dir: PathBuf, path: PathBuf) {
+    let cleanup = path.clone();
     let _ = std::fs::create_dir_all(&dir);
     let d = dir.clone();
     let steps: Vec<(u64, Step)> = vec![
         (2200, Box::new(move |s| { shot(s, &d, "r0_start"); true })),
-        (100, Box::new(move |s| { s.start_scan(path.clone()); true })),
+        (100, Box::new(move |s| {
+            // a throwaway folder for the trash/undo steps, so real files are never touched
+            let t = path.join(SELFTEST_DIR);
+            let _ = std::fs::create_dir_all(&t);
+            let _ = std::fs::write(t.join("delete-me.txt"), b"DiskLens walk-through test file\n");
+            s.start_scan(path.clone());
+            true
+        })),
         (300, Box::new(|s| !s.is_scanning())),
         (700, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r1_main"); true }) }),
         (100, Box::new(|s| { s.menu_on_first_row(); true })),
@@ -95,7 +108,7 @@ fn selftest(st: Rc<window::State>, dir: PathBuf, path: PathBuf) {
         (100, Box::new(|s| {
             // close the confirmation dialog, then trash a known folder directly
             if let Some(d) = s.ui.window.visible_dialog() { d.force_close(); }
-            s.trash_child_now("Documents");
+            s.trash_child_now(SELFTEST_DIR);
             true
         })),
         (900, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r3c_trashed"); true }) }),
@@ -151,7 +164,11 @@ fn selftest(st: Rc<window::State>, dir: PathBuf, path: PathBuf) {
         (900, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r4_narrow"); true }) }),
         (100, Box::new(|s| { s.set_page("dupes"); true })),
         (500, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r5_narrow_tab"); true }) }),
-        (100, Box::new(|s| { s.ui.window.application().unwrap().quit(); true })),
+        (100, { let p = cleanup.clone(); Box::new(move |s| {
+            let _ = std::fs::remove_dir_all(p.join(SELFTEST_DIR));
+            s.ui.window.application().unwrap().quit();
+            true
+        }) }),
     ];
     run_steps(st, Rc::new(steps), 0);
 }

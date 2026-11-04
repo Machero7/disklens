@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=DiskLens
+GenericName=Disk Usage Analyzer
+Comment=See what's using your disk space
+Exec=@BIN@ %f
+Icon=com.familjenhero.DiskLens
+Terminal=false
+Categories=GTK;GNOME;Utility;System;Filesystem;
+Keywords=disk;space;usage;size;treemap;duplicates;treesize;
+StartupNotify=true
+StartupWMClass=com.familjenhero.DiskLens

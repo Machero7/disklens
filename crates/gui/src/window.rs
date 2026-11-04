@@ -734,7 +734,7 @@ fn wire(state: &Rc<State>, drive_pop: &gtk::Popover) {
     act("about", &[], Box::new(|st| {
         adw::AboutDialog::builder()
             .application_name("DiskLens")
-            .application_icon("drive-harddisk-symbolic")
+            .application_icon("com.familjenhero.DiskLens")
             .version(env!("CARGO_PKG_VERSION"))
             .comments("See what's using your disk space.")
             .license_type(gtk::License::MitX11)
