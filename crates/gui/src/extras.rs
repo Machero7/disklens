@@ -175,7 +175,7 @@ impl State {
     #[allow(deprecated)] // GtkShortcutsWindow: still the standard window on GTK 4.18
     pub fn show_shortcuts(&self) {
         let shortcuts = [
-            ("General", vec![("<Control>o", "Scan a folder"), ("F5", "Rescan this folder"), ("Escape", "Stop the scan"), ("<Control>comma", "Preferences"), ("<Control>question", "Keyboard shortcuts")]),
+            ("General", vec![("<Control>o", "Scan a folder"), ("<Control>f", "Search (or just start typing)"), ("F5", "Rescan this folder"), ("Escape", "Stop the scan"), ("<Control>comma", "Preferences"), ("<Control>question", "Keyboard shortcuts")]),
             ("Navigation", vec![("<Alt>Up", "Parent folder"), ("Return", "Open the selected folder or file")]),
             ("Files", vec![("Delete", "Move selection to the Trash"), ("<Control>z", "Undo the last Move to Trash"), ("<Control>e", "Export the list to CSV")]),
         ];
