@@ -60,7 +60,10 @@ fn main() -> glib::ExitCode {
         st.ui.window.present();
         match (&shots, &path) {
             (Some(dir), Some(p)) => selftest(st, dir.clone(), p.clone()),
-            (None, Some(p)) => st.start_scan(p.clone()),
+            (None, Some(p)) => match disklens_core::remote::RemoteSpec::parse(&p.to_string_lossy()) {
+                Some(spec) if !p.exists() => st.start_remote_scan(spec),
+                _ => st.start_scan(p.clone()),
+            },
             _ => {}
         }
     });

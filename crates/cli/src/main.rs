@@ -11,7 +11,7 @@ use disklens_core::scan::{Msg, ScanOptions, Scanner};
 use disklens_core::util::{fmt_int, human};
 use disklens_core::{stats, Tree};
 
-const USAGE: &str = "usage: disklens-scan PATH [--threads N] [--top N] [--all-fs] [--ondisk]";
+const USAGE: &str = "usage: disklens-scan PATH|USER@HOST:/PATH [--threads N] [--top N] [--all-fs] [--ondisk]";
 
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
@@ -40,18 +40,27 @@ fn main() -> ExitCode {
         eprintln!("{USAGE}");
         return ExitCode::FAILURE;
     };
-    let path = match std::fs::canonicalize(&path) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("{}: {e}", path.display());
-            return ExitCode::FAILURE;
-        }
+    // user@host:/path scans a NAS over SSH
+    let remote = disklens_core::remote::RemoteSpec::parse(&path.to_string_lossy()).filter(|_| !path.exists());
+    let path = match &remote {
+        Some(spec) => PathBuf::from(&spec.path),
+        None => match std::fs::canonicalize(&path) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("{}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+        },
     };
 
     let t0 = Instant::now();
     let mut tree = Tree::new(&path);
     let threads = opts.threads;
-    let scanner = match Scanner::start(Tree::ROOT, path.clone(), tree.next_id(), None, opts) {
+    let started = match remote {
+        Some(spec) => disklens_core::remote::start(Tree::ROOT, tree.next_id(), spec, opts),
+        None => Scanner::start(Tree::ROOT, path.clone(), tree.next_id(), None, opts),
+    };
+    let scanner = match started {
         Ok(s) => s,
         Err(e) => {
             eprintln!("{}: {e}", path.display());
@@ -63,6 +72,10 @@ fn main() -> ExitCode {
         match msg {
             Msg::Dir(r) => tree.apply(r),
             Msg::Error(p, e) => errors.push((p, e)),
+            Msg::Fatal(e) => {
+                eprintln!("{e}");
+                return ExitCode::FAILURE;
+            }
             Msg::Done => break,
         }
     }

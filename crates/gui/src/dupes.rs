@@ -16,6 +16,7 @@ use super::actions::{self, Target};
 use super::State;
 use crate::dupitem::DupItem;
 
+const REMOTE_TEXT: &str = "Finding copies compares file contents, so it works on folders on this computer, not on NAS scans.";
 const IDLE_TEXT: &str = "Finds files with identical contents in the folder you're viewing, including its subfolders.";
 
 pub struct DupUi {
@@ -241,7 +242,11 @@ impl State {
             p.cancel.store(true, Ordering::Relaxed);
         }
         self.ui.dups.root.remove_all();
-        self.ui.dups.summary.set_label(IDLE_TEXT);
+        // comparing contents would mean downloading every file from the NAS
+        let remote = self.is_remote();
+        self.ui.dups.find_btn.set_sensitive(!remote);
+        self.ui.dups.min_spin.set_sensitive(!remote);
+        self.ui.dups.summary.set_label(if remote { REMOTE_TEXT } else { IDLE_TEXT });
         self.dups_update_buttons();
         self.dups_update_where();
     }
@@ -257,6 +262,10 @@ impl State {
         }
         if self.is_scanning() {
             self.toast("Wait for the scan to finish before looking for duplicates");
+            return;
+        }
+        if self.is_remote() {
+            self.toast("Finding copies reads every file's contents, so it only works on folders on this computer");
             return;
         }
         let min = (self.ui.dups.min_spin.value() * 1024.0 * 1024.0) as u64;

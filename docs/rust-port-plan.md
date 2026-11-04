@@ -1,6 +1,6 @@
 # DiskLens → Rust: port plan
 
-Status: **all phases done** (2026-11-04). Feature parity with Python v1.1 plus Undo for Trash, Ctrl+Z, theme choice and shared settings. Install with `disklens-rs/install.sh` (see `disklens-rs/README.md`); the Python version stays in git as a fallback. Ctrl+F search added 2026-11-04. Not done yet: remote NAS scanning (planned after parity).
+Status: **all phases done** (2026-11-04). Feature parity with Python v1.1 plus Undo for Trash, Ctrl+Z, theme choice and shared settings. Install with `disklens-rs/install.sh` (see `disklens-rs/README.md`); the Python version stays in git as a fallback. Ctrl+F search added 2026-11-04. Remote NAS scanning over SSH added 2026-11-04 (read-only; GNU find on the NAS via the system ssh; see README).
 
 ## Goal
 Same app, same look, same features: a folder tree and a sortable contents list showing file and folder sizes, plus Biggest Files, File Types, File Ages, Treemap and Duplicates. It ships as one fast native binary. The Python version stays in git until the Rust one reaches parity.

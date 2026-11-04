@@ -145,7 +145,15 @@ pub fn add_actions(st: &Rc<State>) {
     add("ctx-copy", &[], |st| {
         let paths: Vec<String> = {
             let tree = st.tree.borrow();
-            st.ctx_targets.borrow().iter().map(|t| t.path(&tree).display().to_string()).collect()
+            let host = st.remote.borrow().as_ref().and_then(|r| r.host.clone());
+            st.ctx_targets
+                .borrow()
+                .iter()
+                .map(|t| match &host {
+                    Some(h) => format!("{h}:{}", t.path(&tree).display()),
+                    None => t.path(&tree).display().to_string(),
+                })
+                .collect()
         };
         st.ui.window.clipboard().set_text(&paths.join("\n"));
         st.toast(if paths.len() == 1 { "Path copied" } else { "Paths copied" });
@@ -195,8 +203,12 @@ impl State {
         }
         let scanning = self.is_scanning();
         let has_root = targets.iter().any(|t| *t == Target::Dir(Tree::ROOT));
+        let local = !self.is_remote(); // a NAS scan only looks: these would act on this computer
         self.set_action_enabled("ctx-rescan", !scanning);
-        self.set_action_enabled("ctx-trash", !scanning && !has_root);
+        self.set_action_enabled("ctx-trash", !scanning && !has_root && local);
+        for name in ["ctx-open", "ctx-reveal", "ctx-terminal"] {
+            self.set_action_enabled(name, local);
+        }
         *self.ctx_targets.borrow_mut() = targets;
         let pop = gtk::PopoverMenu::from_model(Some(&ctx_menu()));
         pop.set_parent(anchor);
@@ -332,6 +344,10 @@ impl State {
 
     pub fn trash(self: &Rc<Self>, targets: Vec<Target>) {
         if targets.is_empty() {
+            return;
+        }
+        if self.is_remote() {
+            self.toast("NAS scans are read-only: delete files on the NAS itself");
             return;
         }
         if self.is_scanning() {
