@@ -39,6 +39,27 @@ Ctrl+Z undo · Ctrl+E export CSV · Ctrl+, preferences · Ctrl+? all shortcuts.
 
 Settings live in `~/.config/disklens/settings.json` (shared with the Python version).
 
+## Scanning a NAS over SSH
+
+Click **Scan NAS over SSH…** on the start page (or in the drive menu), or run
+`disklens user@192.168.1.50:/volume1`. DiskLens runs GNU `find` on the NAS through one SSH
+connection and streams back sizes, dates and inodes, so the walk runs at the NAS's own disk speed.
+It uses the system `ssh`, so keys, the agent and `~/.ssh/config` host names all work. Password
+logins don't: a window has nowhere to type the password.
+
+One-time setup on a Synology:
+
+1. DSM: **Control Panel → Terminal & SNMP → Enable SSH service**.
+2. DSM: **Control Panel → User & Group → Advanced → Enable user home service** (needed for keys).
+   Your DSM user must be in the *administrators* group to log in over SSH.
+3. On this computer: `ssh-copy-id user@192.168.1.50`, then check `ssh user@192.168.1.50` logs in
+   without asking for a password.
+
+Shares are under `/volume1/<share>`. NAS scans are read-only: Open, Show in File Manager,
+Terminal, Move to Trash and Find Copies are off, because they'd act on this computer.
+Copy Path copies `host:/path`. F5 rescans a folder over SSH. The last NAS that scanned
+successfully is listed on the start page. `disklens-scan USER@HOST:/PATH` does the same from a terminal.
+
 ## Develop
 
 ```

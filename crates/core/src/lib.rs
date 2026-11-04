@@ -7,6 +7,7 @@
 //! applied so far. No locks are shared between the tree and the workers.
 
 pub mod dups;
+pub mod remote;
 pub mod scan;
 pub mod stats;
 pub mod trash;

@@ -55,6 +55,8 @@ pub enum Msg {
     Dir(DirResult),
     /// A file or folder that couldn't be read.
     Error(PathBuf, String),
+    /// The whole scan failed (for example, the NAS couldn't be reached); `Done` follows.
+    Fatal(String),
     Done,
 }
 
@@ -126,6 +128,11 @@ impl Scanner {
                 .spawn(move || worker(shared, work_rx, threads))?;
         }
         Ok(Scanner { rx, progress, cancel, started: Instant::now() })
+    }
+
+    /// For other walkers (the SSH scanner) that feed the same channel.
+    pub(crate) fn from_parts(rx: Receiver<Msg>, progress: Arc<Progress>, cancel: Arc<AtomicBool>) -> Self {
+        Scanner { rx, progress, cancel, started: Instant::now() }
     }
 
     pub fn cancel(&self) {
@@ -276,6 +283,7 @@ pub fn scan_blocking(path: &Path, opts: ScanOptions) -> std::io::Result<(crate::
         match msg {
             Msg::Dir(r) => tree.apply(r),
             Msg::Error(p, e) => errors.push((p, e)),
+            Msg::Fatal(e) => errors.push((path.to_path_buf(), e)),
             Msg::Done => break,
         }
     }

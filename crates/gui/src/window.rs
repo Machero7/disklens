@@ -19,6 +19,8 @@ mod actions;
 mod extras;
 #[path = "dupes.rs"]
 mod dupes;
+#[path = "remote_ui.rs"]
+mod remote_ui;
 
 use crate::mounts;
 use crate::pages::Pages;
@@ -120,6 +122,10 @@ pub struct State {
     settings: RefCell<Settings>,
     /// Progress of the running duplicate search, if any.
     dup_progress: RefCell<Option<std::sync::Arc<disklens_core::dups::Progress>>>,
+    /// Set while showing a NAS scan (host and the scanned folder there).
+    remote: RefCell<Option<disklens_core::remote::RemoteSpec>>,
+    /// Why the last scan failed completely, shown when it ends.
+    fatal: RefCell<Option<String>>,
 }
 
 fn visible(state: &State, name: &[u8]) -> bool {
@@ -152,7 +158,17 @@ pub fn build(app: &adw::Application) -> Rc<State> {
     choose.add_css_class("suggested-action");
     let start_box = gtk::Box::new(gtk::Orientation::Vertical, 24);
     start_box.append(&drive_list);
-    start_box.append(&choose);
+    let nas = gtk::Button::builder()
+        .label("Scan NAS over SSH…")
+        .halign(gtk::Align::Center)
+        .action_name("win.open-remote")
+        .build();
+    nas.add_css_class("pill");
+    let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    buttons.set_halign(gtk::Align::Center);
+    buttons.append(&choose);
+    buttons.append(&nas);
+    start_box.append(&buttons);
     let clamp = adw::Clamp::builder().maximum_size(560).child(&start_box).build();
     let status = adw::StatusPage::builder()
         .icon_name("drive-harddisk-symbolic")
@@ -181,6 +197,7 @@ pub fn build(app: &adw::Application) -> Rc<State> {
     pop_box.append(&drive_pop_list);
     let pop_choose = gtk::Button::builder().label("Choose folder…").action_name("win.open").build();
     pop_box.append(&pop_choose);
+    pop_box.append(&gtk::Button::builder().label("Scan NAS over SSH…").action_name("win.open-remote").build());
     let drive_pop = gtk::Popover::builder().child(&pop_box).build();
     let open_btn = gtk::MenuButton::builder()
         .icon_name("drive-harddisk-symbolic")
@@ -435,6 +452,8 @@ pub fn build(app: &adw::Application) -> Rc<State> {
         trash_toast: RefCell::new(None),
         settings: RefCell::new(settings),
         dup_progress: RefCell::new(None),
+        remote: RefCell::new(None),
+        fatal: RefCell::new(None),
     });
     wire(&state, &drive_pop);
     actions::set_current(&state);
@@ -442,6 +461,7 @@ pub fn build(app: &adw::Application) -> Rc<State> {
     actions::attach_map_ctx(&state);
     extras::add_actions(&state);
     dupes::wire(&state);
+    remote_ui::add_actions(&state);
     state
 }
 
@@ -646,7 +666,7 @@ fn wire(state: &Rc<State>, drive_pop: &gtk::Popover) {
         let Some(row) = st.ui.contents_sort.item(pos).and_downcast::<RowObject>() else { return };
         if row.is_dir() {
             st.show_folder(row.dir(), false);
-        } else if let Some(i) = row.file_index() {
+        } else if let (Some(i), false) = (row.file_index(), st.is_remote()) {
             let path = {
                 let tree = st.tree.borrow();
                 let d = tree.get(row.dir());
@@ -878,6 +898,9 @@ impl State {
             "user-home-symbolic".into(),
             None,
         )];
+        if let Some(nas) = self.last_remote() {
+            entries.push((nas.label(), "NAS over SSH · last used".into(), "network-server-symbolic".into(), None));
+        }
         for m in mounts {
             let used = m.total.saturating_sub(m.free);
             entries.push((
@@ -901,7 +924,10 @@ impl State {
                     if let Some(p) = r.ancestor(gtk::Popover::static_type()) {
                         p.downcast::<gtk::Popover>().unwrap().popdown();
                     }
-                    st.start_scan(PathBuf::from(&path));
+                    match disklens_core::remote::RemoteSpec::parse(&path) {
+                        Some(spec) => st.start_remote_scan(spec),
+                        None => st.start_scan(PathBuf::from(&path)),
+                    }
                 }
             });
             list.append(&row);
@@ -931,6 +957,8 @@ impl State {
         if let Some(s) = self.scanner.borrow().as_ref() {
             s.cancel();
         }
+        *self.remote.borrow_mut() = None;
+        *self.fatal.borrow_mut() = None;
         let dev = std::fs::metadata(&path).ok().map(|m| std::os::unix::fs::MetadataExt::dev(&m));
         self.root_dev.set(dev);
         *self.tree.borrow_mut() = Tree::new(&path);
@@ -954,6 +982,9 @@ impl State {
             let tree = self.tree.borrow();
             RowObject::for_dir(&tree, Tree::ROOT, NONE, true, self.ondisk.get(), now())
         };
+        if self.is_remote() {
+            row.set_name(self.root_label());
+        }
         self.ui.side_root.remove_all();
         self.ui.side_root.append(&row);
         if let Some(r) = self.side_model.get().and_then(|m| m.row(0)) {
@@ -980,6 +1011,9 @@ impl State {
             self.show_folder(dir, false);
         }
         let next = self.tree.borrow().next_id();
+        if self.rescan_remote(dir, next) {
+            return;
+        }
         let opts = ScanOptions { one_fs: self.one_fs.get(), ..Default::default() };
         match Scanner::start(dir, path, next, self.root_dev.get(), opts) {
             Ok(s) => self.run_scanner(s),
@@ -1016,6 +1050,7 @@ impl State {
                 match s.rx.try_recv() {
                     Ok(Msg::Dir(r)) => tree.apply(r),
                     Ok(Msg::Error(p, e)) => errors.push((p, e)),
+                    Ok(Msg::Fatal(e)) => *self.fatal.borrow_mut() = Some(e),
                     Ok(Msg::Done) | Err(TryRecvError::Disconnected) => {
                         done = true;
                         break;
@@ -1045,6 +1080,8 @@ impl State {
             self.ui.stop_btn.set_visible(false);
             self.ui.rescan_btn.set_visible(true);
             self.ticking.set(false);
+            self.remember_remote();
+            self.show_fatal();
             return glib::ControlFlow::Break;
         }
         glib::ControlFlow::Continue
@@ -1390,7 +1427,7 @@ impl State {
         {
             let tree = self.tree.borrow();
             let d = tree.get(dir);
-            let title = if d.parent == NONE { tree.path(dir).display().to_string() } else { d.name_str().into_owned() };
+            let title = if d.parent == NONE { self.root_label() } else { d.name_str().into_owned() };
             self.ui.folder_title.set_label(&title);
             self.ui.folder_sub.set_label(&format!(
                 "{} · {} files · {} folders",
