@@ -129,7 +129,7 @@ fn items(tree: &Tree, dir: u32, ondisk: bool, show_hidden: bool, limit: usize) -
             d.files
                 .iter()
                 .enumerate()
-                .filter(|(_, f)| f.counted && vis(d.file_name_bytes(f)))
+                .filter(|(_, f)| f.counted && !f.removed && vis(d.file_name_bytes(f)))
                 .map(|(i, f)| (f.value(ondisk), Item::File(i as u32))),
         )
         .filter(|(s, _)| *s > 0)

@@ -85,6 +85,20 @@ fn selftest(st: Rc<window::State>, dir: PathBuf, path: PathBuf) {
         (100, Box::new(move |s| { s.start_scan(path.clone()); true })),
         (300, Box::new(|s| !s.is_scanning())),
         (700, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r1_main"); true }) }),
+        (100, Box::new(|s| { s.menu_on_first_row(); true })),
+        (600, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r3a_menu"); true }) }),
+        (100, Box::new(|s| { gtk::prelude::WidgetExt::activate_action(&s.ui.window, "win.ctx-trash", None).ok(); true })),
+        (700, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r3b_confirm"); true }) }),
+        (100, Box::new(|s| {
+            // close the confirmation dialog, then trash a known folder directly
+            if let Some(d) = s.ui.window.visible_dialog() { d.force_close(); }
+            s.trash_child_now("Documents");
+            true
+        })),
+        (900, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r3c_trashed"); true }) }),
+        (100, Box::new(|s| { gtk::prelude::WidgetExt::activate_action(&s.ui.window, "win.undo", None).ok(); true })),
+        (300, Box::new(|s| !s.is_scanning())),
+        (900, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r3d_undone"); true }) }),
         (100, Box::new(|s| { s.set_page("biggest"); true })),
         (700, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r2b_biggest"); true }) }),
         (100, Box::new(|s| { s.set_page("types"); true })),

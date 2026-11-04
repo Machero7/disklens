@@ -13,6 +13,9 @@ use disklens_core::util::{ext_of, fmt_int, human, NO_EXT, RAR_PARTS};
 use disklens_core::{Tree, NONE};
 use gtk::{gio, glib};
 
+#[path = "actions.rs"]
+mod actions;
+
 use crate::mounts;
 use crate::pages::Pages;
 use crate::treemap;
@@ -95,6 +98,11 @@ pub struct State {
     map_hover: Cell<Option<usize>>,
     map_gen: Cell<u64>,
     map_cache: RefCell<Option<((u32, u64, i32, i32, i32, bool), gtk::cairo::ImageSurface)>>,
+    /// What the open context menu acts on.
+    ctx_targets: RefCell<Vec<actions::Target>>,
+    /// Last trashed paths and their folders, for Undo / Ctrl+Z.
+    last_trash: RefCell<Option<(Vec<PathBuf>, Vec<u32>)>>,
+    trash_toast: RefCell<Option<adw::Toast>>,
 }
 
 fn visible(state: &State, name: &[u8]) -> bool {
@@ -368,8 +376,14 @@ pub fn build(app: &adw::Application) -> Rc<State> {
         map_hover: Cell::new(None),
         map_gen: Cell::new(0),
         map_cache: RefCell::new(None),
+        ctx_targets: RefCell::new(Vec::new()),
+        last_trash: RefCell::new(None),
+        trash_toast: RefCell::new(None),
     });
     wire(&state, &drive_pop);
+    actions::set_current(&state);
+    actions::add_actions(&state);
+    actions::attach_map_ctx(&state);
     state
 }
 
@@ -404,6 +418,7 @@ fn side_factory() -> gtk::SignalListItemFactory {
         b.append(&size);
         let exp = gtk::TreeExpander::builder().child(&b).indent_for_icon(true).build();
         li.set_child(Some(&exp));
+        actions::attach_ctx(&exp, li);
         let item = li.property_expression("item");
         item.bind(&exp, "list-row", gtk::Widget::NONE);
         let row = item.chain_property::<gtk::TreeListRow>("item");
@@ -430,6 +445,7 @@ pub(crate) fn label_cell(prop: &'static str, xalign: f32, dim: bool) -> gtk::Sig
             l.add_css_class("dim-label");
         }
         li.set_child(Some(&l));
+        actions::attach_ctx(&l, li);
         li.property_expression("item").chain_property::<RowObject>(prop).bind(&l, "label", gtk::Widget::NONE);
     });
     f
@@ -448,6 +464,7 @@ pub(crate) fn name_cell() -> gtk::SignalListItemFactory {
         b.append(&wrap);
         b.append(&name);
         li.set_child(Some(&b));
+        actions::attach_ctx(&b, li);
         let item = li.property_expression("item");
         item.chain_property::<RowObject>("gicon").bind(&icon, "gicon", gtk::Widget::NONE);
         item.chain_property::<RowObject>("accent").bind(&wrap, "css-classes", gtk::Widget::NONE);
@@ -472,6 +489,7 @@ pub(crate) fn share_cell() -> gtk::SignalListItemFactory {
         b.append(&wrap);
         b.append(&pct);
         li.set_child(Some(&b));
+        actions::attach_ctx(&b, li);
         let item = li.property_expression("item");
         item.chain_property::<RowObject>("fraction").bind(&bar, "fraction", gtk::Widget::NONE);
         item.chain_property::<RowObject>("pct-text").bind(&pct, "label", gtk::Widget::NONE);
@@ -926,12 +944,10 @@ impl State {
         if done {
             let s = self.scanner.borrow_mut().take();
             if let Some(s) = s {
-                let tree = self.tree.borrow();
-                let r = tree.get(Tree::ROOT);
                 *self.last_scan.borrow_mut() = if s.is_cancelled() {
-                    "Scan stopped (partial)".into()
+                    "stopped (partial)".into()
                 } else {
-                    format!("{} files · {:.1} s", fmt_int(r.nfiles), s.elapsed().as_secs_f64())
+                    format!("{:.1} s", s.elapsed().as_secs_f64())
                 };
             }
             self.update_status(true);
@@ -953,7 +969,13 @@ impl State {
             format!("Scanning… {} files", fmt_int(files))
         } else {
             let errs = self.errors.borrow().len();
-            let mut s = format!("{} · {}", human(root.value(self.ondisk.get())), self.last_scan.borrow());
+            // file count is live, so it follows deletions
+            let mut s = format!(
+                "{} · {} files · {}",
+                human(root.value(self.ondisk.get())),
+                fmt_int(root.nfiles),
+                self.last_scan.borrow()
+            );
             if errs > 0 {
                 s.push_str(&format!(" · ⚠ {errs}"));
             }
@@ -1007,7 +1029,7 @@ impl State {
                 .collect();
             if d.scanned {
                 for (i, f) in d.files.iter().enumerate() {
-                    if visible(self, d.file_name_bytes(f)) {
+                    if !f.removed && visible(self, d.file_name_bytes(f)) {
                         let kind = self.kind(&d.file_name(f));
                         rows.push(RowObject::for_file(&tree, dir, i as u32, kind, ondisk, now));
                     }
@@ -1191,7 +1213,7 @@ impl State {
             if d.scanned && !c.files_added {
                 c.files_added = true;
                 for (i, f) in d.files.iter().enumerate() {
-                    if visible(self, d.file_name_bytes(f)) {
+                    if !f.removed && visible(self, d.file_name_bytes(f)) {
                         let kind = self.kind(&d.file_name(f));
                         add.push(RowObject::for_file(&tree, c.dir, i as u32, kind, ondisk, now));
                     }

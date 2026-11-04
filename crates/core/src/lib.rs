@@ -8,6 +8,7 @@
 
 pub mod scan;
 pub mod stats;
+pub mod trash;
 pub mod tree;
 pub mod util;
 

@@ -16,6 +16,8 @@ pub struct FileEntry {
     pub name_len: u16,
     /// false for the 2nd+ name of a hard-linked inode: listed, but not added to totals.
     pub counted: bool,
+    /// Deleted (trashed) after the scan; kept as a tombstone so file indexes stay valid.
+    pub removed: bool,
     pub size: u64,
     pub alloc: u64,
     pub mtime: i64,
@@ -207,6 +209,70 @@ impl Tree {
         d.ndirs = 0;
         d.scanned = false;
         d.error = None;
+    }
+
+    /// False if `id` or a folder above it has been removed with [`Tree::remove_dir`].
+    pub fn is_attached(&self, id: u32) -> bool {
+        let mut n = id;
+        loop {
+            let p = self.get(n).parent;
+            if p == NONE {
+                return n == Self::ROOT;
+            }
+            if !self.get(p).dirs.contains(&n) {
+                return false;
+            }
+            n = p;
+        }
+    }
+
+    /// Mark a file deleted and subtract it from every ancestor. Returns false if it (or a
+    /// folder above it) is already gone, so nothing is subtracted twice.
+    pub fn remove_file(&mut self, dir: u32, idx: u32) -> bool {
+        if !self.is_attached(dir) {
+            return false;
+        }
+        let f = match self.dirs[dir as usize].files.get_mut(idx as usize) {
+            Some(f) if !f.removed => f,
+            _ => return false,
+        };
+        f.removed = true;
+        let (size, alloc) = if f.counted { (f.size, f.alloc) } else { (0, 0) };
+        let mut p = dir;
+        while p != NONE {
+            let d = &mut self.dirs[p as usize];
+            d.size -= size;
+            d.alloc -= alloc;
+            d.nfiles -= 1;
+            p = d.parent;
+        }
+        true
+    }
+
+    /// Detach a folder from its parent and subtract its totals (and itself) from every ancestor.
+    /// The root can't be removed. Returns false if it's already detached.
+    pub fn remove_dir(&mut self, id: u32) -> bool {
+        let parent = self.get(id).parent;
+        if parent == NONE || !self.is_attached(parent) {
+            return false;
+        }
+        let siblings = &mut self.dirs[parent as usize].dirs;
+        let Some(pos) = siblings.iter().position(|&c| c == id) else { return false };
+        siblings.remove(pos);
+        let (size, alloc, nfiles, ndirs) = {
+            let d = self.get(id);
+            (d.size, d.alloc, d.nfiles, d.ndirs + 1)
+        };
+        let mut p = parent;
+        while p != NONE {
+            let d = &mut self.dirs[p as usize];
+            d.size -= size;
+            d.alloc -= alloc;
+            d.nfiles -= nfiles;
+            d.ndirs -= ndirs;
+            p = d.parent;
+        }
+        true
     }
 
     /// Approximate heap memory held by the tree, in bytes.
