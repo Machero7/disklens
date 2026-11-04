@@ -5,6 +5,7 @@
 
 mod mounts;
 mod pages;
+mod treemap;
 mod row;
 mod window;
 
@@ -90,6 +91,8 @@ fn selftest(st: Rc<window::State>, dir: PathBuf, path: PathBuf) {
         (700, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r2c_types"); true }) }),
         (100, Box::new(|s| { s.set_page("ages"); true })),
         (700, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r2d_ages"); true }) }),
+        (100, Box::new(|s| { s.set_page("map"); true })),
+        (700, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r2e_map"); true }) }),
         (100, Box::new(|s| { s.set_page("contents"); true })),
         (100, Box::new(|s| {
             if let Some(c) = s.biggest_child_dir() {

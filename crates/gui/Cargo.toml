@@ -10,3 +10,4 @@ disklens-core = { path = "../core" }
 gtk = { package = "gtk4", version = "0.11", features = ["v4_18"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_6"] }
 libc = "0.2"
+pangocairo = "0.22"

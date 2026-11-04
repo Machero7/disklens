@@ -15,6 +15,7 @@ use gtk::{gio, glib};
 
 use crate::mounts;
 use crate::pages::Pages;
+use crate::treemap;
 use crate::row::RowObject;
 
 /// Same colours as `.accent-N` in style.css, for the cairo-drawn usage strip.
@@ -53,6 +54,7 @@ pub struct Ui {
     rescan_btn: gtk::Button,
     up_btn: gtk::Button,
     pages: Pages,
+    map: gtk::DrawingArea,
 }
 
 struct Contents {
@@ -87,6 +89,12 @@ pub struct State {
     /// The stats pages need recomputing; time (µs) they were last filled.
     stats_dirty: Cell<bool>,
     stats_at: Cell<i64>,
+    /// Treemap: tiles from the last paint, hovered tile, and a cached render keyed by
+    /// (folder, generation, width, height, scale, dark).
+    map_hits: RefCell<Vec<treemap::Hit>>,
+    map_hover: Cell<Option<usize>>,
+    map_gen: Cell<u64>,
+    map_cache: RefCell<Option<((u32, u64, i32, i32, i32, bool), gtk::cairo::ImageSurface)>>,
 }
 
 fn visible(state: &State, name: &[u8]) -> bool {
@@ -237,8 +245,24 @@ pub fn build(app: &adw::Application) -> Rc<State> {
     view_stack.add_titled_with_icon(&pages.biggest.widget, Some("biggest"), "Biggest", "view-sort-descending-symbolic");
     view_stack.add_titled_with_icon(&pages.types.widget, Some("types"), "Types", "text-x-generic-symbolic");
     view_stack.add_titled_with_icon(&pages.ages.widget, Some("ages"), "Ages", "document-open-recent-symbolic");
+    let map = gtk::DrawingArea::builder().hexpand(true).vexpand(true).has_tooltip(true).build();
+    let map_hint = gtk::Label::builder()
+        .label("Each tile's area is its size. Click a folder to open it.")
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    map_hint.add_css_class("dim-label");
+    map_hint.set_margin_top(14);
+    map_hint.set_margin_start(18);
+    map_hint.set_margin_end(18);
+    map.set_margin_start(12);
+    map.set_margin_end(12);
+    map.set_margin_bottom(12);
+    let map_page = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    map_page.append(&map_hint);
+    map_page.append(&map);
+    view_stack.add_titled_with_icon(&map_page, Some("map"), "Map", "view-grid-symbolic");
     for (name, title, icon) in [
-        ("map", "Map", "view-grid-symbolic"),
         ("dupes", "Copies", "edit-copy-symbolic"),
     ] {
         let placeholder = adw::StatusPage::builder()
@@ -314,6 +338,7 @@ pub fn build(app: &adw::Application) -> Rc<State> {
         rescan_btn,
         up_btn,
         pages,
+        map,
     };
     let state = Rc::new(State {
         ui,
@@ -339,6 +364,10 @@ pub fn build(app: &adw::Application) -> Rc<State> {
         last_scan: RefCell::new(String::new()),
         stats_dirty: Cell::new(true),
         stats_at: Cell::new(0),
+        map_hits: RefCell::new(Vec::new()),
+        map_hover: Cell::new(None),
+        map_gen: Cell::new(0),
+        map_cache: RefCell::new(None),
     });
     wire(&state, &drive_pop);
     state
@@ -559,7 +588,66 @@ fn wire(state: &Rc<State>, drive_pop: &gtk::Popover) {
     ui.view_stack.connect_visible_child_name_notify(move |_| {
         if let Some(st) = w.upgrade() {
             st.refresh_stats(true);
+            st.ui.map.queue_draw();
         }
+    });
+
+    // treemap
+    let w = weak.clone();
+    ui.map.set_draw_func(move |_, cr, width, height| {
+        if let Some(st) = w.upgrade() {
+            st.draw_map(cr, width, height);
+        }
+    });
+    let motion = gtk::EventControllerMotion::new();
+    let w = weak.clone();
+    motion.connect_motion(move |_, x, y| {
+        if let Some(st) = w.upgrade() {
+            let h = treemap::hit(&st.map_hits.borrow(), x, y);
+            if st.map_hover.replace(h) != h {
+                st.ui.map.queue_draw();
+            }
+        }
+    });
+    let w = weak.clone();
+    motion.connect_leave(move |_| {
+        if let Some(st) = w.upgrade() {
+            if st.map_hover.replace(None).is_some() {
+                st.ui.map.queue_draw();
+            }
+        }
+    });
+    ui.map.add_controller(motion);
+    let click = gtk::GestureClick::builder().button(1).build();
+    let w = weak.clone();
+    click.connect_released(move |_, _, x, y| {
+        let Some(st) = w.upgrade() else { return };
+        let target = {
+            let hits = st.map_hits.borrow();
+            treemap::hit(&hits, x, y).map(|i| (hits[i].dir, hits[i].parent))
+        };
+        match target {
+            Some((dir, _)) if dir != NONE => st.show_folder(dir, false),
+            Some((_, parent)) if parent != st.current.get() => st.show_folder(parent, false),
+            _ => {}
+        }
+    });
+    ui.map.add_controller(click);
+    let w = weak.clone();
+    ui.map.connect_query_tooltip(move |_, x, y, _, tip| {
+        let Some(st) = w.upgrade() else { return false };
+        let hits = st.map_hits.borrow();
+        let Some(h) = treemap::hit(&hits, x as f64, y as f64).map(|i| &hits[i]) else { return false };
+        let tree = st.tree.borrow();
+        let path = if h.dir != NONE {
+            tree.path(h.dir).display().to_string()
+        } else if h.file.is_some() {
+            tree.path(h.parent).join(&h.label).display().to_string()
+        } else {
+            format!("{} in {}", h.label, tree.path(h.parent).display())
+        };
+        tip.set_text(Some(&format!("{path}\n{}", human(h.value))));
+        true
     });
 
     // usage strip
@@ -941,6 +1029,56 @@ impl State {
         }
         self.stats_dirty.set(true);
         self.refresh_stats(true);
+        self.invalidate_map();
+    }
+
+    /// The tree or the view options changed: repaint the treemap if it's showing.
+    fn invalidate_map(&self) {
+        self.map_gen.set(self.map_gen.get() + 1);
+        self.map_hover.set(None);
+        if self.ui.view_stack.visible_child_name().as_deref() == Some("map") {
+            self.ui.map.queue_draw();
+        }
+    }
+
+    fn draw_map(&self, cr: &gtk::cairo::Context, width: i32, height: i32) {
+        let dir = self.current.get();
+        if dir == NONE || width <= 0 || height <= 0 {
+            return;
+        }
+        let scale = self.ui.map.scale_factor();
+        let dark = adw::StyleManager::default().is_dark();
+        let key = (dir, self.map_gen.get(), width, height, scale, dark);
+        let cached = matches!(self.map_cache.borrow().as_ref(), Some((k, _)) if *k == key);
+        if !cached {
+            let Ok(surf) = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, width * scale, height * scale) else { return };
+            surf.set_device_scale(scale as f64, scale as f64);
+            let Ok(c) = gtk::cairo::Context::new(&surf) else { return };
+            let tree = self.tree.borrow();
+            let mut p = treemap::Painter {
+                cr: &c,
+                layout: self.ui.map.create_pango_layout(None),
+                tree: &tree,
+                ondisk: self.ondisk.get(),
+                show_hidden: self.show_hidden.get(),
+                hits: Vec::new(),
+            };
+            p.level(dir, 0.0, 0.0, width as f64, height as f64, 0, None);
+            *self.map_hits.borrow_mut() = std::mem::take(&mut p.hits);
+            drop(p);
+            drop(c);
+            *self.map_cache.borrow_mut() = Some((key, surf));
+        }
+        if let Some((_, surf)) = self.map_cache.borrow().as_ref() {
+            let _ = cr.set_source_surface(surf, 0.0, 0.0);
+            let _ = cr.paint();
+        }
+        if let Some(i) = self.map_hover.get() {
+            if let Some(h) = self.map_hits.borrow().get(i) {
+                let fg = self.ui.map.color();
+                treemap::draw_hover(cr, h, (fg.red() as f64, fg.green() as f64, fg.blue() as f64));
+            }
+        }
     }
 
     /// Refill Biggest/Types/Ages if one is showing and the data changed.
@@ -1083,6 +1221,7 @@ impl State {
         }
         self.stats_dirty.set(true);
         self.refresh_stats(self.scanner.borrow().is_none());
+        self.invalidate_map();
     }
 
     /// Hidden-files toggle: rebuild the sidebar and Contents from scratch.
