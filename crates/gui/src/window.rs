@@ -56,6 +56,12 @@ pub struct Ui {
     legend: gtk::Box,
     contents_view: gtk::ColumnView,
     contents_sort: gtk::SortListModel,
+    /// Between the folder's rows and the sorter: hides rows that don't match the search.
+    contents_filter: gtk::FilterListModel,
+    name_filter: gtk::CustomFilter,
+    search_bar: gtk::SearchBar,
+    search_entry: gtk::SearchEntry,
+    search_count: gtk::Label,
     contents_scroll: gtk::ScrolledWindow,
     progress: gtk::ProgressBar,
     stop_btn: gtk::Button,
@@ -95,6 +101,8 @@ pub struct State {
     ticking: Cell<bool>,
     tick_n: Cell<u64>,
     last_scan: RefCell<String>,
+    /// Search text, lower-cased (shared with the name filter).
+    query: Rc<RefCell<String>>,
     /// The stats pages need recomputing; time (µs) they were last filled.
     stats_dirty: Cell<bool>,
     stats_at: Cell<i64>,
@@ -245,7 +253,19 @@ pub fn build(app: &adw::Application) -> Rc<State> {
     header.append(&legend);
 
     let contents_view = gtk::ColumnView::builder().reorderable(false).build();
-    let contents_sort = gtk::SortListModel::new(None::<gio::ListModel>, contents_view.sorter());
+    // search: rows whose name (or folder / extension) contains the typed text, any case
+    let query: Rc<RefCell<String>> = Rc::new(RefCell::new(String::new()));
+    let q = query.clone();
+    let name_filter = gtk::CustomFilter::new(move |obj| {
+        let q = q.borrow();
+        if q.is_empty() {
+            return true;
+        }
+        let Some(r) = obj.downcast_ref::<RowObject>() else { return true };
+        r.sort_name().contains(q.as_str()) || r.detail().to_lowercase().contains(q.as_str())
+    });
+    let contents_filter = gtk::FilterListModel::new(None::<gio::ListModel>, Some(name_filter.clone()));
+    let contents_sort = gtk::SortListModel::new(Some(contents_filter.clone()), contents_view.sorter());
     contents_view.set_model(Some(&gtk::MultiSelection::new(Some(contents_sort.clone()))));
     add_contents_columns(&contents_view);
     let contents_scroll = gtk::ScrolledWindow::builder().child(&contents_view).vexpand(true).build();
@@ -286,7 +306,23 @@ pub fn build(app: &adw::Application) -> Rc<State> {
 
     let switcher_bar = adw::ViewSwitcherBar::builder().stack(&view_stack).build();
     let content_tv = adw::ToolbarView::new();
+    let search_entry = gtk::SearchEntry::builder().hexpand(true).build();
+    let search_count = gtk::Label::new(None);
+    search_count.add_css_class("dim-label");
+    search_count.add_css_class("numeric");
+    let search_box = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    search_box.append(&search_entry);
+    search_box.append(&search_count);
+    let search_bar = gtk::SearchBar::builder()
+        .child(&adw::Clamp::builder().maximum_size(640).child(&search_box).build())
+        .build();
+    search_bar.connect_entry(&search_entry);
+    search_bar.set_key_capture_widget(Some(&window)); // start typing anywhere to search
+    let search_btn = gtk::ToggleButton::builder().icon_name("system-search-symbolic").tooltip_text("Search (Ctrl+F)").build();
+    search_btn.bind_property("active", &search_bar, "search-mode-enabled").bidirectional().sync_create().build();
+    content_hb.pack_end(&search_btn);
     content_tv.add_top_bar(&content_hb);
+    content_tv.add_top_bar(&search_bar);
     content_tv.add_top_bar(&progress);
     content_tv.add_bottom_bar(&switcher_bar);
     content_tv.set_content(Some(&view_stack));
@@ -325,6 +361,8 @@ pub fn build(app: &adw::Application) -> Rc<State> {
     for b in [&dups.top, &dups.bar] {
         bp.add_setter(b, "orientation", Some(&gtk::Orientation::Vertical.to_value()));
     }
+    pages.biggest.filter_with(&name_filter);
+    pages.types.filter_with(&name_filter);
     for page in [&pages.biggest, &pages.types, &pages.ages] {
         for col in &page.narrow_hide {
             bp.add_setter(col, "visible", Some(&false.to_value()));
@@ -349,6 +387,11 @@ pub fn build(app: &adw::Application) -> Rc<State> {
         legend,
         contents_view,
         contents_sort,
+        contents_filter,
+        name_filter,
+        search_bar,
+        search_entry,
+        search_count,
         contents_scroll,
         progress,
         stop_btn,
@@ -380,6 +423,7 @@ pub fn build(app: &adw::Application) -> Rc<State> {
         ticking: Cell::new(false),
         tick_n: Cell::new(0),
         last_scan: RefCell::new(String::new()),
+        query,
         stats_dirty: Cell::new(true),
         stats_at: Cell::new(0),
         map_hits: RefCell::new(Vec::new()),
@@ -625,6 +669,25 @@ fn wire(state: &Rc<State>, drive_pop: &gtk::Popover) {
         if let Some(st) = w.upgrade() {
             st.refresh_stats(true);
             st.ui.map.queue_draw();
+            st.update_search_count();
+        }
+    });
+
+    // search bar
+    let w = weak.clone();
+    ui.search_entry.connect_search_changed(move |e| {
+        if let Some(st) = w.upgrade() {
+            *st.query.borrow_mut() = e.text().to_lowercase();
+            st.ui.name_filter.changed(gtk::FilterChange::Different);
+            st.update_search_count();
+        }
+    });
+    let w = weak.clone();
+    ui.search_bar.connect_search_mode_enabled_notify(move |b| {
+        if let Some(st) = w.upgrade() {
+            if !b.is_search_mode() {
+                st.ui.search_entry.set_text(""); // closing the bar shows everything again
+            }
         }
     });
 
@@ -728,7 +791,13 @@ fn wire(state: &Rc<State>, drive_pop: &gtk::Popover) {
     act("stop", &["Escape"], Box::new(|st| {
         if let Some(s) = st.scanner.borrow().as_ref() {
             s.cancel();
+        } else if st.ui.search_bar.is_search_mode() {
+            st.ui.search_bar.set_search_mode(false);
         }
+    }));
+    act("search", &["<Control>f"], Box::new(|st| {
+        st.ui.search_bar.set_search_mode(true);
+        st.ui.search_entry.grab_focus();
     }));
     act("rescan", &["F5"], Box::new(|st| st.rescan(st.current.get())));
     act("about", &[], Box::new(|st| {
@@ -1060,7 +1129,7 @@ impl State {
         };
         let store = gio::ListStore::new::<RowObject>();
         store.extend_from_slice(&rows);
-        self.ui.contents_sort.set_model(Some(&store));
+        self.ui.contents_filter.set_model(Some(&store));
         *self.contents.borrow_mut() = Some(Contents { dir, store, synced: ndirs, files_added: scanned });
         self.update_header();
         self.ui.up_btn.set_sensitive(self.tree.borrow().get(dir).parent != NONE);
@@ -1074,6 +1143,35 @@ impl State {
         self.refresh_stats(true);
         self.invalidate_map();
         self.dups_update_where();
+        self.update_search_count();
+    }
+
+    /// For the screenshot walk-through: open the search bar with `text` ("" closes it).
+    pub fn set_search(&self, text: &str) {
+        self.ui.search_bar.set_search_mode(!text.is_empty());
+        self.ui.search_entry.set_text(text);
+    }
+
+    /// Placeholder and "N matches" for the tab that's showing.
+    fn update_search_count(&self) {
+        let page = self.ui.view_stack.visible_child_name().unwrap_or_default();
+        let (model, hint) = match page.as_str() {
+            "contents" => (Some(&self.ui.contents_sort), "Filter this folder by name"),
+            "biggest" => (Some(&self.ui.pages.biggest.sorted), "Filter by file or folder name"),
+            "types" => (Some(&self.ui.pages.types.sorted), "Filter by type or extension"),
+            _ => (None, "Search works on the Folder, Biggest and Types tabs"),
+        };
+        self.ui.search_entry.set_placeholder_text(Some(hint));
+        self.ui.search_entry.set_sensitive(model.is_some());
+        let text = match model {
+            Some(m) if !self.query.borrow().is_empty() => match m.n_items() {
+                0 => "No matches".to_string(),
+                1 => "1 match".to_string(),
+                n => format!("{} matches", fmt_int(n as u64)),
+            },
+            _ => String::new(),
+        };
+        self.ui.search_count.set_label(&text);
     }
 
     /// The tree or the view options changed: repaint the treemap if it's showing.
@@ -1140,6 +1238,8 @@ impl State {
         let tree = self.tree.borrow();
         let kind = |name: &str| self.kind(name);
         self.ui.pages.fill(&tree, self.current.get(), self.ondisk.get(), self.show_hidden.get(), now(), &kind);
+        drop(tree);
+        self.update_search_count();
         // measured after filling, so a slow fill can't hog the main loop during a scan
         self.stats_at.set(glib::monotonic_time());
     }
@@ -1266,6 +1366,7 @@ impl State {
         self.stats_dirty.set(true);
         self.refresh_stats(self.scanner.borrow().is_none());
         self.invalidate_map();
+        self.update_search_count();
     }
 
     /// Hidden-files toggle: rebuild the sidebar and Contents from scratch.

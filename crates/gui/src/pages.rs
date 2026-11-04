@@ -104,6 +104,12 @@ impl ListPage {
         ListPage { widget, view, sorted, summary, store, narrow_hide }
     }
 
+    /// Show only rows that pass `filter` (the search bar).
+    pub fn filter_with(&self, filter: &gtk::CustomFilter) {
+        let fm = gtk::FilterListModel::new(Some(self.store.clone()), Some(filter.clone()));
+        self.sorted.set_model(Some(&fm));
+    }
+
     fn set_rows(&self, rows: &[RowObject], summary: &str) {
         self.store.splice(0, self.store.n_items(), rows);
         self.summary.set_label(summary);

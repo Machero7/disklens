@@ -31,7 +31,10 @@ The installer moves older DiskLens launchers (the Python one and "DiskLens Previ
 Right-click any file or folder: Open, Show in File Manager, Open Terminal Here, Copy Path,
 Go to Folder, Rescan, Move to Trash. Trash can be undone (toast button or Ctrl+Z).
 
-Shortcuts: Ctrl+O scan · F5 rescan · Esc stop · Alt+Up parent · Delete trash ·
+Search: press Ctrl+F (or just start typing) to filter the Folder, Biggest and Types lists by
+name; Esc closes the search.
+
+Shortcuts: Ctrl+O scan · Ctrl+F search · F5 rescan · Esc stop · Alt+Up parent · Delete trash ·
 Ctrl+Z undo · Ctrl+E export CSV · Ctrl+, preferences · Ctrl+? all shortcuts.
 
 Settings live in `~/.config/disklens/settings.json` (shared with the Python version).
