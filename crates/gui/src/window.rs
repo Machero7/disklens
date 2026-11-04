@@ -13,8 +13,18 @@ use disklens_core::util::{ext_of, fmt_int, human, NO_EXT, RAR_PARTS};
 use disklens_core::{Tree, NONE};
 use gtk::{gio, glib};
 
+#[path = "actions.rs"]
+mod actions;
+#[path = "extras.rs"]
+mod extras;
+#[path = "dupes.rs"]
+mod dupes;
+
 use crate::mounts;
+use crate::pages::Pages;
+use crate::treemap;
 use crate::row::RowObject;
+use crate::settings::Settings;
 
 /// Same colours as `.accent-N` in style.css, for the cairo-drawn usage strip.
 const ACCENTS: [(f64, f64, f64); 4] = [
@@ -51,6 +61,9 @@ pub struct Ui {
     stop_btn: gtk::Button,
     rescan_btn: gtk::Button,
     up_btn: gtk::Button,
+    pages: Pages,
+    map: gtk::DrawingArea,
+    dups: dupes::DupUi,
 }
 
 struct Contents {
@@ -82,6 +95,23 @@ pub struct State {
     ticking: Cell<bool>,
     tick_n: Cell<u64>,
     last_scan: RefCell<String>,
+    /// The stats pages need recomputing; time (µs) they were last filled.
+    stats_dirty: Cell<bool>,
+    stats_at: Cell<i64>,
+    /// Treemap: tiles from the last paint, hovered tile, and a cached render keyed by
+    /// (folder, generation, width, height, scale, dark).
+    map_hits: RefCell<Vec<treemap::Hit>>,
+    map_hover: Cell<Option<usize>>,
+    map_gen: Cell<u64>,
+    map_cache: RefCell<Option<((u32, u64, i32, i32, i32, bool), gtk::cairo::ImageSurface)>>,
+    /// What the open context menu acts on.
+    ctx_targets: RefCell<Vec<actions::Target>>,
+    /// Last trashed paths and their folders, for Undo / Ctrl+Z.
+    last_trash: RefCell<Option<(Vec<PathBuf>, Vec<u32>)>>,
+    trash_toast: RefCell<Option<adw::Toast>>,
+    settings: RefCell<Settings>,
+    /// Progress of the running duplicate search, if any.
+    dup_progress: RefCell<Option<std::sync::Arc<disklens_core::dups::Progress>>>,
 }
 
 fn visible(state: &State, name: &[u8]) -> bool {
@@ -91,11 +121,13 @@ fn visible(state: &State, name: &[u8]) -> bool {
 // ------------------------------------------------------------------ construction
 
 pub fn build(app: &adw::Application) -> Rc<State> {
+    let settings = Settings::load();
+    extras::apply_theme(&settings.str("theme").unwrap_or_default());
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("DiskLens")
-        .default_width(1320)
-        .default_height(820)
+        .default_width(settings.int("width", 1320).clamp(360, 10_000) as i32)
+        .default_height(settings.int("height", 820).clamp(400, 10_000) as i32)
         .width_request(360)
         .height_request(400)
         .build();
@@ -227,21 +259,30 @@ pub fn build(app: &adw::Application) -> Rc<State> {
     contents_page.append(&header);
     contents_page.append(&contents_scroll);
 
-    view_stack.add_titled_with_icon(&contents_page, Some("contents"), "Contents", "folder-symbolic");
-    for (name, title, icon) in [
-        ("biggest", "Biggest", "view-sort-descending-symbolic"),
-        ("types", "Types", "text-x-generic-symbolic"),
-        ("ages", "Ages", "document-open-recent-symbolic"),
-        ("map", "Map", "view-grid-symbolic"),
-        ("dupes", "Duplicates", "edit-copy-symbolic"),
-    ] {
-        let placeholder = adw::StatusPage::builder()
-            .icon_name(icon)
-            .title(title)
-            .description("Coming in the next build step.")
-            .build();
-        view_stack.add_titled_with_icon(&placeholder, Some(name), title, icon);
-    }
+    view_stack.add_titled_with_icon(&contents_page, Some("contents"), "Folder", "folder-symbolic");
+    let pages = Pages::new();
+    view_stack.add_titled_with_icon(&pages.biggest.widget, Some("biggest"), "Biggest", "view-sort-descending-symbolic");
+    view_stack.add_titled_with_icon(&pages.types.widget, Some("types"), "Types", "text-x-generic-symbolic");
+    view_stack.add_titled_with_icon(&pages.ages.widget, Some("ages"), "Ages", "document-open-recent-symbolic");
+    let map = gtk::DrawingArea::builder().hexpand(true).vexpand(true).has_tooltip(true).build();
+    let map_hint = gtk::Label::builder()
+        .label("Each tile's area is its size. Click a folder to open it.")
+        .xalign(0.0)
+        .wrap(true)
+        .build();
+    map_hint.add_css_class("dim-label");
+    map_hint.set_margin_top(14);
+    map_hint.set_margin_start(18);
+    map_hint.set_margin_end(18);
+    map.set_margin_start(12);
+    map.set_margin_end(12);
+    map.set_margin_bottom(12);
+    let map_page = gtk::Box::new(gtk::Orientation::Vertical, 10);
+    map_page.append(&map_hint);
+    map_page.append(&map);
+    view_stack.add_titled_with_icon(&map_page, Some("map"), "Map", "view-grid-symbolic");
+    let dups = dupes::build_page(settings.float("dup_min_mb", 1.0));
+    view_stack.add_titled_with_icon(&dups.widget, Some("dupes"), "Copies", "edit-copy-symbolic");
 
     let switcher_bar = adw::ViewSwitcherBar::builder().stack(&view_stack).build();
     let content_tv = adw::ToolbarView::new();
@@ -278,6 +319,17 @@ pub fn build(app: &adw::Application) -> Rc<State> {
             bp.add_setter(&col, "visible", Some(&false.to_value()));
         }
     }
+    for col in &dups.narrow_hide {
+        bp.add_setter(col, "visible", Some(&false.to_value()));
+    }
+    for b in [&dups.top, &dups.bar] {
+        bp.add_setter(b, "orientation", Some(&gtk::Orientation::Vertical.to_value()));
+    }
+    for page in [&pages.biggest, &pages.types, &pages.ages] {
+        for col in &page.narrow_hide {
+            bp.add_setter(col, "visible", Some(&false.to_value()));
+        }
+    }
     window.add_breakpoint(bp);
 
     let ui = Ui {
@@ -302,6 +354,9 @@ pub fn build(app: &adw::Application) -> Rc<State> {
         stop_btn,
         rescan_btn,
         up_btn,
+        pages,
+        map,
+        dups,
     };
     let state = Rc::new(State {
         ui,
@@ -318,27 +373,47 @@ pub fn build(app: &adw::Application) -> Rc<State> {
         legend_key: RefCell::new(String::new()),
         kinds: RefCell::new(HashMap::new()),
         errors: RefCell::new(Vec::new()),
-        ondisk: Cell::new(false),
-        show_hidden: Cell::new(true),
-        one_fs: Cell::new(true),
+        ondisk: Cell::new(settings.bool("ondisk", false)),
+        show_hidden: Cell::new(settings.bool("hidden", true)),
+        one_fs: Cell::new(settings.bool("onefs", true)),
         syncing: Cell::new(false),
         ticking: Cell::new(false),
         tick_n: Cell::new(0),
         last_scan: RefCell::new(String::new()),
+        stats_dirty: Cell::new(true),
+        stats_at: Cell::new(0),
+        map_hits: RefCell::new(Vec::new()),
+        map_hover: Cell::new(None),
+        map_gen: Cell::new(0),
+        map_cache: RefCell::new(None),
+        ctx_targets: RefCell::new(Vec::new()),
+        last_trash: RefCell::new(None),
+        trash_toast: RefCell::new(None),
+        settings: RefCell::new(settings),
+        dup_progress: RefCell::new(None),
     });
     wire(&state, &drive_pop);
+    actions::set_current(&state);
+    actions::add_actions(&state);
+    actions::attach_map_ctx(&state);
+    extras::add_actions(&state);
+    dupes::wire(&state);
     state
 }
 
 fn menu_button() -> gtk::MenuButton {
     let menu = gio::Menu::new();
     let view = gio::Menu::new();
-    view.append(Some("Show size on disk"), Some("win.ondisk"));
-    view.append(Some("Show hidden files"), Some("win.hidden"));
-    view.append(Some("Stay on one filesystem"), Some("win.onefs"));
+    view.append(Some("Show Size on Disk"), Some("win.ondisk"));
+    view.append(Some("Show Hidden Files"), Some("win.hidden"));
     menu.append_section(None, &view);
+    let files = gio::Menu::new();
+    files.append(Some("Scan Folder…"), Some("win.open"));
+    files.append(Some("Export to CSV…"), Some("win.export"));
+    menu.append_section(None, &files);
     let other = gio::Menu::new();
-    other.append(Some("Scan folder…"), Some("win.open"));
+    other.append(Some("Preferences"), Some("win.preferences"));
+    other.append(Some("Keyboard Shortcuts"), Some("win.shortcuts"));
     other.append(Some("About DiskLens"), Some("win.about"));
     menu.append_section(None, &other);
     gtk::MenuButton::builder().icon_name("open-menu-symbolic").menu_model(&menu).primary(true).build()
@@ -361,6 +436,7 @@ fn side_factory() -> gtk::SignalListItemFactory {
         b.append(&size);
         let exp = gtk::TreeExpander::builder().child(&b).indent_for_icon(true).build();
         li.set_child(Some(&exp));
+        actions::attach_ctx(&exp, li);
         let item = li.property_expression("item");
         item.bind(&exp, "list-row", gtk::Widget::NONE);
         let row = item.chain_property::<gtk::TreeListRow>("item");
@@ -371,13 +447,13 @@ fn side_factory() -> gtk::SignalListItemFactory {
     f
 }
 
-fn sorter(cmp: impl Fn(&RowObject, &RowObject) -> std::cmp::Ordering + 'static) -> gtk::CustomSorter {
+pub(crate) fn sorter(cmp: impl Fn(&RowObject, &RowObject) -> std::cmp::Ordering + 'static) -> gtk::CustomSorter {
     gtk::CustomSorter::new(move |a, b| {
         cmp(a.downcast_ref::<RowObject>().unwrap(), b.downcast_ref::<RowObject>().unwrap()).into()
     })
 }
 
-fn label_cell(prop: &'static str, xalign: f32, dim: bool) -> gtk::SignalListItemFactory {
+pub(crate) fn label_cell(prop: &'static str, xalign: f32, dim: bool) -> gtk::SignalListItemFactory {
     let f = gtk::SignalListItemFactory::new();
     f.connect_setup(move |_, obj| {
         let li = obj.downcast_ref::<gtk::ListItem>().unwrap();
@@ -387,13 +463,14 @@ fn label_cell(prop: &'static str, xalign: f32, dim: bool) -> gtk::SignalListItem
             l.add_css_class("dim-label");
         }
         li.set_child(Some(&l));
+        actions::attach_ctx(&l, li);
         li.property_expression("item").chain_property::<RowObject>(prop).bind(&l, "label", gtk::Widget::NONE);
     });
     f
 }
 
-fn add_contents_columns(view: &gtk::ColumnView) {
-    // Name: coloured icon + name
+/// Name cell: coloured icon + name.
+pub(crate) fn name_cell() -> gtk::SignalListItemFactory {
     let name_f = gtk::SignalListItemFactory::new();
     name_f.connect_setup(|_, obj| {
         let li = obj.downcast_ref::<gtk::ListItem>().unwrap();
@@ -405,12 +482,17 @@ fn add_contents_columns(view: &gtk::ColumnView) {
         b.append(&wrap);
         b.append(&name);
         li.set_child(Some(&b));
+        actions::attach_ctx(&b, li);
         let item = li.property_expression("item");
         item.chain_property::<RowObject>("gicon").bind(&icon, "gicon", gtk::Widget::NONE);
         item.chain_property::<RowObject>("accent").bind(&wrap, "css-classes", gtk::Widget::NONE);
         item.chain_property::<RowObject>("name").bind(&name, "label", gtk::Widget::NONE);
     });
-    // Share: coloured rounded bar + percentage
+    name_f
+}
+
+/// Share cell: coloured rounded bar + percentage.
+pub(crate) fn share_cell() -> gtk::SignalListItemFactory {
     let share_f = gtk::SignalListItemFactory::new();
     share_f.connect_setup(|_, obj| {
         let li = obj.downcast_ref::<gtk::ListItem>().unwrap();
@@ -425,6 +507,7 @@ fn add_contents_columns(view: &gtk::ColumnView) {
         b.append(&wrap);
         b.append(&pct);
         li.set_child(Some(&b));
+        actions::attach_ctx(&b, li);
         let item = li.property_expression("item");
         item.chain_property::<RowObject>("fraction").bind(&bar, "fraction", gtk::Widget::NONE);
         item.chain_property::<RowObject>("pct-text").bind(&pct, "label", gtk::Widget::NONE);
@@ -440,7 +523,11 @@ fn add_contents_columns(view: &gtk::ColumnView) {
         )
         .bind(&wrap, "css-classes", gtk::Widget::NONE);
     });
+    share_f
+}
 
+fn add_contents_columns(view: &gtk::ColumnView) {
+    let (name_f, share_f) = (name_cell(), share_cell());
     let cols: [(&str, gtk::SignalListItemFactory, gtk::CustomSorter, i32, bool); 6] = [
         ("Name", name_f, sorter(|a, b| a.sort_name().cmp(&b.sort_name())), 0, true),
         ("Size", label_cell("size-text", 1.0, false), sorter(|a, b| a.size().cmp(&b.size())), 95, false),
@@ -525,6 +612,80 @@ fn wire(state: &Rc<State>, drive_pop: &gtk::Popover) {
         }
     });
 
+    // Biggest: activating a file opens its folder in Contents
+    let w = weak.clone();
+    ui.pages.biggest.view.connect_activate(move |_, pos| {
+        let Some(st) = w.upgrade() else { return };
+        let Some(row) = st.ui.pages.biggest.sorted.item(pos).and_downcast::<RowObject>() else { return };
+        st.show_folder(row.dir(), false);
+        st.set_page("contents");
+    });
+    let w = weak.clone();
+    ui.view_stack.connect_visible_child_name_notify(move |_| {
+        if let Some(st) = w.upgrade() {
+            st.refresh_stats(true);
+            st.ui.map.queue_draw();
+        }
+    });
+
+    // treemap
+    let w = weak.clone();
+    ui.map.set_draw_func(move |_, cr, width, height| {
+        if let Some(st) = w.upgrade() {
+            st.draw_map(cr, width, height);
+        }
+    });
+    let motion = gtk::EventControllerMotion::new();
+    let w = weak.clone();
+    motion.connect_motion(move |_, x, y| {
+        if let Some(st) = w.upgrade() {
+            let h = treemap::hit(&st.map_hits.borrow(), x, y);
+            if st.map_hover.replace(h) != h {
+                st.ui.map.queue_draw();
+            }
+        }
+    });
+    let w = weak.clone();
+    motion.connect_leave(move |_| {
+        if let Some(st) = w.upgrade() {
+            if st.map_hover.replace(None).is_some() {
+                st.ui.map.queue_draw();
+            }
+        }
+    });
+    ui.map.add_controller(motion);
+    let click = gtk::GestureClick::builder().button(1).build();
+    let w = weak.clone();
+    click.connect_released(move |_, _, x, y| {
+        let Some(st) = w.upgrade() else { return };
+        let target = {
+            let hits = st.map_hits.borrow();
+            treemap::hit(&hits, x, y).map(|i| (hits[i].dir, hits[i].parent))
+        };
+        match target {
+            Some((dir, _)) if dir != NONE => st.show_folder(dir, false),
+            Some((_, parent)) if parent != st.current.get() => st.show_folder(parent, false),
+            _ => {}
+        }
+    });
+    ui.map.add_controller(click);
+    let w = weak.clone();
+    ui.map.connect_query_tooltip(move |_, x, y, _, tip| {
+        let Some(st) = w.upgrade() else { return false };
+        let hits = st.map_hits.borrow();
+        let Some(h) = treemap::hit(&hits, x as f64, y as f64).map(|i| &hits[i]) else { return false };
+        let tree = st.tree.borrow();
+        let path = if h.dir != NONE {
+            tree.path(h.dir).display().to_string()
+        } else if h.file.is_some() {
+            tree.path(h.parent).join(&h.label).display().to_string()
+        } else {
+            format!("{} in {}", h.label, tree.path(h.parent).display())
+        };
+        tip.set_text(Some(&format!("{path}\n{}", human(h.value))));
+        true
+    });
+
     // usage strip
     let w = weak.clone();
     ui.strip.set_draw_func(move |_, cr, width, height| {
@@ -573,7 +734,7 @@ fn wire(state: &Rc<State>, drive_pop: &gtk::Popover) {
     act("about", &[], Box::new(|st| {
         adw::AboutDialog::builder()
             .application_name("DiskLens")
-            .application_icon("drive-harddisk-symbolic")
+            .application_icon("com.familjenhero.DiskLens")
             .version(env!("CARGO_PKG_VERSION"))
             .comments("See what's using your disk space.")
             .license_type(gtk::License::MitX11)
@@ -592,15 +753,16 @@ fn wire(state: &Rc<State>, drive_pop: &gtk::Popover) {
         });
         win.add_action(&a);
     };
-    toggle("ondisk", false, Box::new(|st, v| {
+    let (ondisk, hidden, onefs) = (state.ondisk.get(), state.show_hidden.get(), state.one_fs.get());
+    toggle("ondisk", ondisk, Box::new(|st, v| {
         st.ondisk.set(v);
         st.sync_views();
     }));
-    toggle("hidden", true, Box::new(|st, v| {
+    toggle("hidden", hidden, Box::new(|st, v| {
         st.show_hidden.set(v);
         st.rebuild_views();
     }));
-    toggle("onefs", true, Box::new(|st, v| st.one_fs.set(v)));
+    toggle("onefs", onefs, Box::new(|st, v| st.one_fs.set(v)));
 }
 
 // ------------------------------------------------------------------ behaviour
@@ -707,6 +869,7 @@ impl State {
         *self.contents.borrow_mut() = None;
         self.errors.borrow_mut().clear();
         self.current.set(NONE);
+        self.dups_reset();
         self.ui.stack.set_visible_child_name("main");
         self.reset_side_root();
         self.show_folder(Tree::ROOT, false);
@@ -733,6 +896,7 @@ impl State {
         if dir == NONE || self.scanner.borrow().is_some() {
             return;
         }
+        self.dups_reset();
         let path = {
             let mut tree = self.tree.borrow_mut();
             tree.reset(dir);
@@ -801,12 +965,10 @@ impl State {
         if done {
             let s = self.scanner.borrow_mut().take();
             if let Some(s) = s {
-                let tree = self.tree.borrow();
-                let r = tree.get(Tree::ROOT);
                 *self.last_scan.borrow_mut() = if s.is_cancelled() {
-                    "Scan stopped (partial)".into()
+                    "stopped (partial)".into()
                 } else {
-                    format!("{} files · {:.1} s", fmt_int(r.nfiles), s.elapsed().as_secs_f64())
+                    format!("{:.1} s", s.elapsed().as_secs_f64())
                 };
             }
             self.update_status(true);
@@ -828,7 +990,13 @@ impl State {
             format!("Scanning… {} files", fmt_int(files))
         } else {
             let errs = self.errors.borrow().len();
-            let mut s = format!("{} · {}", human(root.value(self.ondisk.get())), self.last_scan.borrow());
+            // file count is live, so it follows deletions
+            let mut s = format!(
+                "{} · {} files · {}",
+                human(root.value(self.ondisk.get())),
+                fmt_int(root.nfiles),
+                self.last_scan.borrow()
+            );
             if errs > 0 {
                 s.push_str(&format!(" · ⚠ {errs}"));
             }
@@ -882,7 +1050,7 @@ impl State {
                 .collect();
             if d.scanned {
                 for (i, f) in d.files.iter().enumerate() {
-                    if visible(self, d.file_name_bytes(f)) {
+                    if !f.removed && visible(self, d.file_name_bytes(f)) {
                         let kind = self.kind(&d.file_name(f));
                         rows.push(RowObject::for_file(&tree, dir, i as u32, kind, ondisk, now));
                     }
@@ -902,6 +1070,78 @@ impl State {
         if !from_side {
             self.select_in_side(dir);
         }
+        self.stats_dirty.set(true);
+        self.refresh_stats(true);
+        self.invalidate_map();
+        self.dups_update_where();
+    }
+
+    /// The tree or the view options changed: repaint the treemap if it's showing.
+    fn invalidate_map(&self) {
+        self.map_gen.set(self.map_gen.get() + 1);
+        self.map_hover.set(None);
+        if self.ui.view_stack.visible_child_name().as_deref() == Some("map") {
+            self.ui.map.queue_draw();
+        }
+    }
+
+    fn draw_map(&self, cr: &gtk::cairo::Context, width: i32, height: i32) {
+        let dir = self.current.get();
+        if dir == NONE || width <= 0 || height <= 0 {
+            return;
+        }
+        let scale = self.ui.map.scale_factor();
+        let dark = adw::StyleManager::default().is_dark();
+        let key = (dir, self.map_gen.get(), width, height, scale, dark);
+        let cached = matches!(self.map_cache.borrow().as_ref(), Some((k, _)) if *k == key);
+        if !cached {
+            let Ok(surf) = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, width * scale, height * scale) else { return };
+            surf.set_device_scale(scale as f64, scale as f64);
+            let Ok(c) = gtk::cairo::Context::new(&surf) else { return };
+            let tree = self.tree.borrow();
+            let mut p = treemap::Painter {
+                cr: &c,
+                layout: self.ui.map.create_pango_layout(None),
+                tree: &tree,
+                ondisk: self.ondisk.get(),
+                show_hidden: self.show_hidden.get(),
+                hits: Vec::new(),
+            };
+            p.level(dir, 0.0, 0.0, width as f64, height as f64, 0, None);
+            *self.map_hits.borrow_mut() = std::mem::take(&mut p.hits);
+            drop(p);
+            drop(c);
+            *self.map_cache.borrow_mut() = Some((key, surf));
+        }
+        if let Some((_, surf)) = self.map_cache.borrow().as_ref() {
+            let _ = cr.set_source_surface(surf, 0.0, 0.0);
+            let _ = cr.paint();
+        }
+        if let Some(i) = self.map_hover.get() {
+            if let Some(h) = self.map_hits.borrow().get(i) {
+                let fg = self.ui.map.color();
+                treemap::draw_hover(cr, h, (fg.red() as f64, fg.green() as f64, fg.blue() as f64));
+            }
+        }
+    }
+
+    /// Refill Biggest/Types/Ages if one is showing and the data changed.
+    /// `now_ok=false` (live scan updates) limits refills to about once a second.
+    fn refresh_stats(&self, now_ok: bool) {
+        let page = self.ui.view_stack.visible_child_name().unwrap_or_default();
+        if !Pages::is_stats_page(&page) || !self.stats_dirty.get() || self.current.get() == NONE {
+            return;
+        }
+        let t = glib::monotonic_time();
+        if !now_ok && t - self.stats_at.get() < 1_000_000 {
+            return;
+        }
+        self.stats_dirty.set(false);
+        let tree = self.tree.borrow();
+        let kind = |name: &str| self.kind(name);
+        self.ui.pages.fill(&tree, self.current.get(), self.ondisk.get(), self.show_hidden.get(), now(), &kind);
+        // measured after filling, so a slow fill can't hog the main loop during a scan
+        self.stats_at.set(glib::monotonic_time());
     }
 
     fn go_up(self: &Rc<Self>) {
@@ -995,7 +1235,7 @@ impl State {
             if d.scanned && !c.files_added {
                 c.files_added = true;
                 for (i, f) in d.files.iter().enumerate() {
-                    if visible(self, d.file_name_bytes(f)) {
+                    if !f.removed && visible(self, d.file_name_bytes(f)) {
                         let kind = self.kind(&d.file_name(f));
                         add.push(RowObject::for_file(&tree, c.dir, i as u32, kind, ondisk, now));
                     }
@@ -1023,6 +1263,9 @@ impl State {
         if at_top && self.ui.contents_sort.n_items() > 0 {
             self.ui.contents_view.scroll_to(0, None, gtk::ListScrollFlags::NONE, None);
         }
+        self.stats_dirty.set(true);
+        self.refresh_stats(self.scanner.borrow().is_none());
+        self.invalidate_map();
     }
 
     /// Hidden-files toggle: rebuild the sidebar and Contents from scratch.

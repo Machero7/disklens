@@ -53,6 +53,11 @@ pub fn compute(tree: &Tree, root: u32, ondisk: bool, top_n: usize, show_hidden: 
         let d = tree.get(id);
         stack.extend_from_slice(&d.dirs);
         for (i, f) in d.files.iter().enumerate() {
+            // removed: trashed after the scan; !counted: 2nd+ name of a hard-linked file,
+            // which the folder totals also count only once
+            if f.removed || !f.counted {
+                continue;
+            }
             let name = d.file_name(f);
             if !show_hidden && name.starts_with('.') {
                 continue;

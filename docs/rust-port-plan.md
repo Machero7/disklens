@@ -1,6 +1,6 @@
 # DiskLens → Rust: port plan
 
-Status: **phase 1 look-and-feel prototype done** (2026-11-03): libadwaita window with start page, sidebar tree, folder header + usage strip, live Contents list, adaptive narrow layout, dark mode; other tabs are placeholders. Run: `disklens-rs/target/release/disklens [PATH]` or the "DiskLens Preview" launcher. Phase 0 done: engine + `disklens-scan` CLI in `disklens-rs/`. Decisions: **libadwaita, full modern GNOME redesign** (user, 2026-11-03; libadwaita-1-dev 1.9.1 installed), Python frozen during the port, remote scan after parity. Python v1.1 (`disklens.py`) is the reference; its behaviour is the spec.
+Status: **all phases done** (2026-11-04). Feature parity with Python v1.1 plus Undo for Trash, Ctrl+Z, theme choice and shared settings. Install with `disklens-rs/install.sh` (see `disklens-rs/README.md`); the Python version stays in git as a fallback. Not done yet: Ctrl+F search (marked "New" below) and remote NAS scanning (planned after parity).
 
 ## Goal
 Same app, same look, same features: a folder tree and a sortable contents list showing file and folder sizes, plus Biggest Files, File Types, File Ages, Treemap and Duplicates. It ships as one fast native binary. The Python version stays in git until the Rust one reaches parity.

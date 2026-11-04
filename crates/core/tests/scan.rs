@@ -111,5 +111,42 @@ fn stats_top_exts_ages() {
     assert_eq!(st.top.len(), 3);
     assert_eq!(st.exts[".bin"].size, 50_000);
     assert_eq!(st.exts[".txt"].count, 1);
-    assert_eq!(st.ages[0].1, 6, "everything was just written");
+    // 5 files: the hard link to a/two is the same file, so it is counted once
+    assert_eq!(st.ages[0].1, 5, "everything was just written");
+}
+
+#[test]
+fn remove_file_and_dir_update_ancestors() {
+    let t = fixture();
+    let (mut tree, _) = scan_blocking(t.path(), ScanOptions::default()).unwrap();
+    let b = child(&tree, Tree::ROOT, "b");
+    let c = child(&tree, b, "c");
+    let (root_size, root_files, root_dirs) = {
+        let r = tree.get(Tree::ROOT);
+        (r.size, r.nfiles, r.ndirs)
+    };
+
+    // b/three (300 bytes)
+    let idx = tree.get(b).files.iter().position(|f| tree.get(b).file_name(f) == "three").unwrap() as u32;
+    assert!(tree.remove_file(b, idx));
+    assert!(!tree.remove_file(b, idx), "second removal is a no-op");
+    assert_eq!(tree.get(b).size, 50_000);
+    assert_eq!(tree.get(Tree::ROOT).size, root_size - 300);
+    assert_eq!(tree.get(Tree::ROOT).nfiles, root_files - 1);
+    let st = stats::compute(&tree, Tree::ROOT, false, 10, true, 0);
+    assert_eq!(st.total, root_size - 300, "stats skip removed files");
+
+    // b/c (one 50 000-byte file)
+    assert!(tree.remove_dir(c));
+    assert!(!tree.remove_dir(c));
+    assert!(tree.get(b).dirs.is_empty());
+    assert_eq!(tree.get(b).size, 0);
+    let r = tree.get(Tree::ROOT);
+    assert_eq!(r.size, root_size - 300 - 50_000);
+    assert_eq!(r.nfiles, root_files - 2);
+    assert_eq!(r.ndirs, root_dirs - 1);
+    assert!(!tree.remove_dir(Tree::ROOT), "root can't be removed");
+    // big.bin lives in the removed b/c: removing it again must not subtract twice
+    assert!(!tree.remove_file(c, 0));
+    assert_eq!(tree.get(Tree::ROOT).size, root_size - 300 - 50_000);
 }

@@ -6,8 +6,10 @@
 //! own files to every ancestor, so totals are always consistent with what has been
 //! applied so far. No locks are shared between the tree and the workers.
 
+pub mod dups;
 pub mod scan;
 pub mod stats;
+pub mod trash;
 pub mod tree;
 pub mod util;
 

@@ -215,6 +215,7 @@ fn scan_dir(sh: &Shared, id: u32, path: &Path) {
             name_off: names.len() as u32,
             name_len: name_len as u16,
             counted,
+            removed: false,
             size: md.size(),
             alloc: md.blocks() * 512,
             mtime: md.mtime(),
