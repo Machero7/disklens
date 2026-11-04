@@ -32,6 +32,18 @@ impl Target {
         })
     }
 
+    /// What a list item refers to: a Folder/Biggest/sidebar row or a Copies file row.
+    pub fn of(obj: &glib::Object) -> Option<Self> {
+        let obj = match obj.downcast_ref::<gtk::TreeListRow>() {
+            Some(tr) => tr.item()?,
+            None => obj.clone(),
+        };
+        if let Some(r) = obj.downcast_ref::<RowObject>() {
+            return Self::from_row(r);
+        }
+        obj.downcast_ref::<crate::dupitem::DupItem>()?.file_ref().map(|r| Target::File(r.dir, r.idx))
+    }
+
     pub fn path(&self, tree: &Tree) -> PathBuf {
         match *self {
             Target::Dir(d) => tree.path(d),
@@ -77,14 +89,9 @@ pub fn attach_ctx(widget: &impl IsA<gtk::Widget>, li: &gtk::ListItem) {
     let li_weak = li.downgrade();
     click.connect_pressed(move |g, _, x, y| {
         let (Some(li), Some(st)) = (li_weak.upgrade(), CURRENT.with(|c| c.borrow().upgrade())) else { return };
-        let Some(item) = li.item() else { return };
-        let row = match item.downcast::<gtk::TreeListRow>() {
-            Ok(tr) => tr.item().and_downcast::<RowObject>(),
-            Err(item) => item.downcast::<RowObject>().ok(),
-        };
-        let (Some(row), Some(w)) = (row, g.widget()) else { return };
+        let (Some(t), Some(w)) = (li.item().as_ref().and_then(Target::of), g.widget()) else { return };
         g.set_state(gtk::EventSequenceState::Claimed);
-        st.row_context(&w, li.position(), &row, x, y);
+        st.row_context(&w, li.position(), t, x, y);
     });
     widget.as_ref().add_controller(click);
 }
@@ -206,8 +213,7 @@ impl State {
 
     /// Right-click on a list row. In multi-selection lists the click joins (or replaces)
     /// the selection, like in Files; the menu then acts on every selected row.
-    fn row_context(self: &Rc<Self>, cell: &gtk::Widget, pos: u32, row: &RowObject, x: f64, y: f64) {
-        let Some(t) = Target::from_row(row) else { return };
+    fn row_context(self: &Rc<Self>, cell: &gtk::Widget, pos: u32, t: Target, x: f64, y: f64) {
         let list: Option<gtk::Widget> = cell
             .ancestor(gtk::ColumnView::static_type())
             .or_else(|| cell.ancestor(gtk::ListView::static_type()));
@@ -422,6 +428,7 @@ impl State {
         for (t, _) in &done {
             self.remove_from_views(*t);
         }
+        self.dups_prune();
         self.sync_views();
         self.update_status(true);
 
@@ -596,7 +603,7 @@ fn selected_in(sel: &gtk::SelectionModel) -> Vec<Target> {
     if let Some((mut iter, first)) = gtk::BitsetIter::init_first(&bits) {
         let mut pos = Some(first);
         while let Some(p) = pos {
-            if let Some(t) = sel.item(p).and_downcast::<RowObject>().as_ref().and_then(Target::from_row) {
+            if let Some(t) = sel.item(p).as_ref().and_then(Target::of) {
                 v.push(t);
             }
             pos = iter.next();

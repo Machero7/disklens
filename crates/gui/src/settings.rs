@@ -27,6 +27,14 @@ impl Settings {
         self.raw.get(key).and_then(Value::as_bool).unwrap_or(default)
     }
 
+    pub fn float(&self, key: &str, default: f64) -> f64 {
+        self.raw.get(key).and_then(Value::as_f64).unwrap_or(default)
+    }
+
+    pub fn str(&self, key: &str) -> Option<String> {
+        self.raw.get(key).and_then(Value::as_str).map(str::to_string)
+    }
+
     pub fn int(&self, key: &str, default: i64) -> i64 {
         self.raw.get(key).and_then(Value::as_f64).map(|v| v as i64).unwrap_or(default)
     }

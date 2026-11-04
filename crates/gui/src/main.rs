@@ -3,6 +3,7 @@
 //! Usage: disklens [PATH]
 //!        disklens --shots DIR PATH   (scripted walk-through that saves PNG screenshots)
 
+mod dupitem;
 mod mounts;
 mod pages;
 mod treemap;
@@ -125,6 +126,14 @@ fn selftest(st: Rc<window::State>, dir: PathBuf, path: PathBuf) {
         (700, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r2d_ages"); true }) }),
         (100, Box::new(|s| { s.set_page("map"); true })),
         (700, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r2e_map"); true }) }),
+        (100, Box::new(|s| { s.set_page("dupes"); gtk::prelude::WidgetExt::activate_action(&s.ui.window, "win.dups-find", None).ok(); true })),
+        (300, Box::new(|s| !s.dups_running())),
+        (500, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r2f_dupes"); true }) }),
+        (100, Box::new(|s| { gtk::prelude::WidgetExt::activate_action(&s.ui.window, "win.dups-keep-oldest", None).ok(); true })),
+        (400, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r2g_dupes_marked"); true }) }),
+        (100, Box::new(|s| { gtk::prelude::WidgetExt::activate_action(&s.ui.window, "win.dups-trash", None).ok(); true })),
+        (700, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r2h_dupes_confirm"); true }) }),
+        (100, Box::new(|s| { if let Some(d) = s.ui.window.visible_dialog() { d.force_close(); } true })),
         (100, Box::new(|s| { s.set_page("contents"); true })),
         (100, Box::new(|s| {
             if let Some(c) = s.biggest_child_dir() {
@@ -140,7 +149,7 @@ fn selftest(st: Rc<window::State>, dir: PathBuf, path: PathBuf) {
         (800, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r3_dark"); true }) }),
         (100, Box::new(|s| { s.ui.window.set_default_size(720, 820); true })),
         (900, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r4_narrow"); true }) }),
-        (100, Box::new(|s| { s.set_page("map"); true })),
+        (100, Box::new(|s| { s.set_page("dupes"); true })),
         (500, { let d = dir.clone(); Box::new(move |s| { shot(s, &d, "r5_narrow_tab"); true }) }),
         (100, Box::new(|s| { s.ui.window.application().unwrap().quit(); true })),
     ];

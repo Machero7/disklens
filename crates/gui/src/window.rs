@@ -17,6 +17,8 @@ use gtk::{gio, glib};
 mod actions;
 #[path = "extras.rs"]
 mod extras;
+#[path = "dupes.rs"]
+mod dupes;
 
 use crate::mounts;
 use crate::pages::Pages;
@@ -61,6 +63,7 @@ pub struct Ui {
     up_btn: gtk::Button,
     pages: Pages,
     map: gtk::DrawingArea,
+    dups: dupes::DupUi,
 }
 
 struct Contents {
@@ -107,6 +110,8 @@ pub struct State {
     last_trash: RefCell<Option<(Vec<PathBuf>, Vec<u32>)>>,
     trash_toast: RefCell<Option<adw::Toast>>,
     settings: RefCell<Settings>,
+    /// Progress of the running duplicate search, if any.
+    dup_progress: RefCell<Option<std::sync::Arc<disklens_core::dups::Progress>>>,
 }
 
 fn visible(state: &State, name: &[u8]) -> bool {
@@ -117,6 +122,7 @@ fn visible(state: &State, name: &[u8]) -> bool {
 
 pub fn build(app: &adw::Application) -> Rc<State> {
     let settings = Settings::load();
+    extras::apply_theme(&settings.str("theme").unwrap_or_default());
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("DiskLens")
@@ -275,16 +281,8 @@ pub fn build(app: &adw::Application) -> Rc<State> {
     map_page.append(&map_hint);
     map_page.append(&map);
     view_stack.add_titled_with_icon(&map_page, Some("map"), "Map", "view-grid-symbolic");
-    for (name, title, icon) in [
-        ("dupes", "Copies", "edit-copy-symbolic"),
-    ] {
-        let placeholder = adw::StatusPage::builder()
-            .icon_name(icon)
-            .title(title)
-            .description("Coming in the next build step.")
-            .build();
-        view_stack.add_titled_with_icon(&placeholder, Some(name), title, icon);
-    }
+    let dups = dupes::build_page(settings.float("dup_min_mb", 1.0));
+    view_stack.add_titled_with_icon(&dups.widget, Some("dupes"), "Copies", "edit-copy-symbolic");
 
     let switcher_bar = adw::ViewSwitcherBar::builder().stack(&view_stack).build();
     let content_tv = adw::ToolbarView::new();
@@ -321,6 +319,12 @@ pub fn build(app: &adw::Application) -> Rc<State> {
             bp.add_setter(&col, "visible", Some(&false.to_value()));
         }
     }
+    for col in &dups.narrow_hide {
+        bp.add_setter(col, "visible", Some(&false.to_value()));
+    }
+    for b in [&dups.top, &dups.bar] {
+        bp.add_setter(b, "orientation", Some(&gtk::Orientation::Vertical.to_value()));
+    }
     for page in [&pages.biggest, &pages.types, &pages.ages] {
         for col in &page.narrow_hide {
             bp.add_setter(col, "visible", Some(&false.to_value()));
@@ -352,6 +356,7 @@ pub fn build(app: &adw::Application) -> Rc<State> {
         up_btn,
         pages,
         map,
+        dups,
     };
     let state = Rc::new(State {
         ui,
@@ -385,12 +390,14 @@ pub fn build(app: &adw::Application) -> Rc<State> {
         last_trash: RefCell::new(None),
         trash_toast: RefCell::new(None),
         settings: RefCell::new(settings),
+        dup_progress: RefCell::new(None),
     });
     wire(&state, &drive_pop);
     actions::set_current(&state);
     actions::add_actions(&state);
     actions::attach_map_ctx(&state);
     extras::add_actions(&state);
+    dupes::wire(&state);
     state
 }
 
@@ -862,6 +869,7 @@ impl State {
         *self.contents.borrow_mut() = None;
         self.errors.borrow_mut().clear();
         self.current.set(NONE);
+        self.dups_reset();
         self.ui.stack.set_visible_child_name("main");
         self.reset_side_root();
         self.show_folder(Tree::ROOT, false);
@@ -888,6 +896,7 @@ impl State {
         if dir == NONE || self.scanner.borrow().is_some() {
             return;
         }
+        self.dups_reset();
         let path = {
             let mut tree = self.tree.borrow_mut();
             tree.reset(dir);
@@ -1064,6 +1073,7 @@ impl State {
         self.stats_dirty.set(true);
         self.refresh_stats(true);
         self.invalidate_map();
+        self.dups_update_where();
     }
 
     /// The tree or the view options changed: repaint the treemap if it's showing.

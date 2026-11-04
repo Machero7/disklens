@@ -20,6 +20,17 @@ pub fn csv_field(s: &str) -> String {
     }
 }
 
+const THEMES: [(&str, &str); 3] = [("system", "Follow System"), ("light", "Light"), ("dark", "Dark")];
+
+/// Apply a saved theme name ("system", "light" or "dark").
+pub fn apply_theme(name: &str) {
+    adw::StyleManager::default().set_color_scheme(match name {
+        "light" => adw::ColorScheme::ForceLight,
+        "dark" => adw::ColorScheme::ForceDark,
+        _ => adw::ColorScheme::Default,
+    });
+}
+
 fn iso_time(t: i64) -> String {
     glib::DateTime::from_unix_local(t)
         .ok()
@@ -120,6 +131,23 @@ impl State {
     pub fn show_preferences(self: &Rc<Self>) {
         let dlg = adw::PreferencesDialog::builder().title("Preferences").build();
         let page = adw::PreferencesPage::new();
+        let look = adw::PreferencesGroup::builder().title("Appearance").build();
+        let current = self.settings.borrow().str("theme").unwrap_or_else(|| "system".into());
+        let theme = adw::ComboRow::builder()
+            .title("Style")
+            .model(&gtk::StringList::new(&THEMES.map(|t| t.1)))
+            .selected(THEMES.iter().position(|t| t.0 == current).unwrap_or(0) as u32)
+            .build();
+        let w = Rc::downgrade(self);
+        theme.connect_selected_notify(move |r| {
+            let name = THEMES[(r.selected() as usize).min(THEMES.len() - 1)].0;
+            apply_theme(name);
+            if let Some(st) = w.upgrade() {
+                st.settings.borrow_mut().set("theme", name);
+            }
+        });
+        look.add(&theme);
+        page.add(&look);
         let sizes = adw::PreferencesGroup::builder().title("Sizes").build();
         let scanning = adw::PreferencesGroup::builder().title("Scanning").build();
         let rows = [
