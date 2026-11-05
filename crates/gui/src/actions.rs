@@ -220,7 +220,9 @@ impl State {
             // unparent after the menu item's action has run
             glib::idle_add_local_once(move || p.unparent());
         });
-        pop.popup();
+        // Show it on the next idle cycle: popped up straight away, GTK measures the menu
+        // before its last section is laid out, so it came out one row short and needed scrolling.
+        glib::idle_add_local_once(move || pop.popup());
     }
 
     /// Right-click on a list row. In multi-selection lists the click joins (or replaces)
