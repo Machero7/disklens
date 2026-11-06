@@ -21,6 +21,8 @@ mod extras;
 mod dupes;
 #[path = "remote_ui.rs"]
 mod remote_ui;
+#[path = "types_ui.rs"]
+mod types_ui;
 
 use crate::mounts;
 use crate::pages::Pages;
@@ -126,6 +128,10 @@ pub struct State {
     remote: RefCell<Option<disklens_core::remote::RemoteSpec>>,
     /// Why the last scan failed completely, shown when it ends.
     fatal: RefCell<Option<String>>,
+    /// Biggest tab limited to one file type: (extension key, description).
+    type_filter: RefCell<Option<(String, String)>>,
+    /// The type a Types-tab context menu is open for.
+    ctx_type: RefCell<Option<(String, String)>>,
 }
 
 fn visible(state: &State, name: &[u8]) -> bool {
@@ -454,6 +460,8 @@ pub fn build(app: &adw::Application) -> Rc<State> {
         dup_progress: RefCell::new(None),
         remote: RefCell::new(None),
         fatal: RefCell::new(None),
+        type_filter: RefCell::new(None),
+        ctx_type: RefCell::new(None),
     });
     wire(&state, &drive_pop);
     actions::set_current(&state);
@@ -462,6 +470,7 @@ pub fn build(app: &adw::Application) -> Rc<State> {
     extras::add_actions(&state);
     dupes::wire(&state);
     remote_ui::add_actions(&state);
+    types_ui::add_actions(&state);
     state
 }
 
@@ -959,6 +968,7 @@ impl State {
         }
         *self.remote.borrow_mut() = None;
         *self.fatal.borrow_mut() = None;
+        self.set_type_filter(None);
         let dev = std::fs::metadata(&path).ok().map(|m| std::os::unix::fs::MetadataExt::dev(&m));
         self.root_dev.set(dev);
         *self.tree.borrow_mut() = Tree::new(&path);
@@ -1080,6 +1090,10 @@ impl State {
             self.ui.stop_btn.set_visible(false);
             self.ui.rescan_btn.set_visible(true);
             self.ticking.set(false);
+            // live refreshes during the scan are limited to one a second, so a short scan
+            // (a rescan, or the one after Undo) could end before Biggest/Types/Ages caught up
+            self.stats_dirty.set(true);
+            self.refresh_stats(true);
             self.remember_remote();
             self.show_fatal();
             return glib::ControlFlow::Break;
@@ -1274,7 +1288,9 @@ impl State {
         self.stats_dirty.set(false);
         let tree = self.tree.borrow();
         let kind = |name: &str| self.kind(name);
-        self.ui.pages.fill(&tree, self.current.get(), self.ondisk.get(), self.show_hidden.get(), now(), &kind);
+        let filter = self.type_filter.borrow().clone();
+        let only = filter.as_ref().map(|(k, d)| (k.as_str(), d.as_str()));
+        self.ui.pages.fill(&tree, self.current.get(), self.ondisk.get(), self.show_hidden.get(), now(), &kind, only);
         drop(tree);
         self.update_search_count();
         // measured after filling, so a slow fill can't hog the main loop during a scan

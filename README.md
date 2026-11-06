@@ -34,6 +34,10 @@ The installer moves older DiskLens launchers (the Python one and "DiskLens Previ
 | Map | Treemap: each tile's area is its size; click a folder to open it |
 | Copies | Files with identical contents; mark extra copies and move them to the Trash |
 
+On the Types tab, double-click a type (or right-click → Show Files) to list only that type's
+files on the Biggest tab; a banner offers Show All Types. Right-click → Move All to Trash… moves
+every file of that type in the current folder and its subfolders to the Trash, after asking.
+
 Right-click any file or folder: Open, Show in File Manager, Open Terminal Here, Copy Path,
 Go to Folder, Rescan, Move to Trash. Trash can be undone (toast button or Ctrl+Z).
 
