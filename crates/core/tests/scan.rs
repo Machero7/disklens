@@ -150,3 +150,27 @@ fn remove_file_and_dir_update_ancestors() {
     assert!(!tree.remove_file(c, 0));
     assert_eq!(tree.get(Tree::ROOT).size, root_size - 300 - 50_000);
 }
+
+#[test]
+fn biggest_filtered_by_type_and_files_of_type() {
+    let t = fixture();
+    let (tree, _) = scan_blocking(t.path(), ScanOptions::default()).unwrap();
+    let name = |r: &stats::FileRef| tree.get(r.dir).file_name(&tree.get(r.dir).files[r.idx as usize]).into_owned();
+
+    // only .txt files in the top list; the per-type figures still cover everything
+    let st = stats::compute_filtered(&tree, Tree::ROOT, false, 10, true, 0, Some(".txt"));
+    let top: Vec<String> = st.top.iter().map(name).collect();
+    assert_eq!(top, vec!["top.txt"]);
+    assert!(st.exts.contains_key(".bin"), "Types still sees every type");
+    assert_eq!(st.total, 1000 + 2000 + 300 + 50_000 + 10);
+
+    // files without an extension: one, two, two-link, three
+    let mut none: Vec<String> = stats::files_of_type(&tree, Tree::ROOT, disklens_core::util::NO_EXT, true).iter().map(name).collect();
+    none.sort();
+    assert_eq!(none, vec!["one", "three", "two", "two-link"]);
+
+    // under b/ only: b/three (no extension) and b/c/big.bin
+    let b = child(&tree, Tree::ROOT, "b");
+    let bins: Vec<String> = stats::files_of_type(&tree, b, ".bin", true).iter().map(name).collect();
+    assert_eq!(bins, vec!["big.bin"]);
+}

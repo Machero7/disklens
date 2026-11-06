@@ -94,6 +94,7 @@ impl State {
             s.cancel();
         }
         *self.remote.borrow_mut() = Some(spec.clone());
+        self.set_type_filter(None);
         self.root_dev.set(None);
         *self.tree.borrow_mut() = Tree::new(Path::new(&spec.path));
         self.side_stores.borrow_mut().clear();

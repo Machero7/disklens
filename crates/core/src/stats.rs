@@ -44,6 +44,20 @@ pub struct Stats {
 /// Walk the subtree under `root`. `show_hidden=false` skips dot-files (not dot-folders' contents
 /// in totals, matching the Python version: hidden folders are still walked).
 pub fn compute(tree: &Tree, root: u32, ondisk: bool, top_n: usize, show_hidden: bool, now: i64) -> Stats {
+    compute_filtered(tree, root, ondisk, top_n, show_hidden, now, None)
+}
+
+/// Like [`compute`], but the biggest-files list only holds files of type `only_ext`
+/// (a key from [`crate::util::ext_of`]); the per-type and per-age figures still cover everything.
+pub fn compute_filtered(
+    tree: &Tree,
+    root: u32,
+    ondisk: bool,
+    top_n: usize,
+    show_hidden: bool,
+    now: i64,
+    only_ext: Option<&str>,
+) -> Stats {
     let mut heap: BinaryHeap<Reverse<(u64, FileRef)>> = BinaryHeap::with_capacity(top_n + 1);
     let mut exts: HashMap<String, ExtStat> = HashMap::new();
     let mut ages = vec![(0u64, 0u64); AGE_BUCKETS.len()];
@@ -65,15 +79,19 @@ pub fn compute(tree: &Tree, root: u32, ondisk: bool, top_n: usize, show_hidden: 
             let v = f.value(ondisk);
             total += v;
             let r = FileRef { dir: id, idx: i as u32 };
-            if heap.len() < top_n {
-                heap.push(Reverse((v, r)));
-            } else if let Some(Reverse((min, _))) = heap.peek() {
-                if v > *min {
-                    heap.pop();
+            let ext = ext_of(&name);
+            let in_top = only_ext.is_none_or(|x| x == ext);
+            if in_top {
+                if heap.len() < top_n {
                     heap.push(Reverse((v, r)));
+                } else if let Some(Reverse((min, _))) = heap.peek() {
+                    if v > *min {
+                        heap.pop();
+                        heap.push(Reverse((v, r)));
+                    }
                 }
             }
-            let e = exts.entry(ext_of(&name)).or_default();
+            let e = exts.entry(ext).or_default();
             if e.count == 0 {
                 e.sample = name.into_owned();
             }
@@ -91,4 +109,26 @@ pub fn compute(tree: &Tree, root: u32, ondisk: bool, top_n: usize, show_hidden: 
     let mut top: Vec<(u64, FileRef)> = heap.into_iter().map(|Reverse(x)| x).collect();
     top.sort_by(|a, b| b.cmp(a));
     Stats { top: top.into_iter().map(|(_, r)| r).collect(), exts, ages, total }
+}
+
+/// Every file of type `ext` (a key from [`crate::util::ext_of`]) under `root`, in walk order.
+/// Skips removed files and, unless `show_hidden`, dot-files, matching what the lists show.
+pub fn files_of_type(tree: &Tree, root: u32, ext: &str, show_hidden: bool) -> Vec<FileRef> {
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        let d = tree.get(id);
+        stack.extend_from_slice(&d.dirs);
+        for (i, f) in d.files.iter().enumerate() {
+            if f.removed {
+                continue;
+            }
+            let name = d.file_name(f);
+            if (!show_hidden && name.starts_with('.')) || ext_of(&name) != ext {
+                continue;
+            }
+            out.push(FileRef { dir: id, idx: i as u32 });
+        }
+    }
+    out
 }

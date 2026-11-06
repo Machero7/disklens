@@ -89,9 +89,17 @@ pub fn attach_ctx(widget: &impl IsA<gtk::Widget>, li: &gtk::ListItem) {
     let li_weak = li.downgrade();
     click.connect_pressed(move |g, _, x, y| {
         let (Some(li), Some(st)) = (li_weak.upgrade(), CURRENT.with(|c| c.borrow().upgrade())) else { return };
-        let (Some(t), Some(w)) = (li.item().as_ref().and_then(Target::of), g.widget()) else { return };
-        g.set_state(gtk::EventSequenceState::Claimed);
-        st.row_context(&w, li.position(), t, x, y);
+        let Some(w) = g.widget() else { return };
+        let item = li.item();
+        if let Some(t) = item.as_ref().and_then(Target::of) {
+            g.set_state(gtk::EventSequenceState::Claimed);
+            st.row_context(&w, li.position(), t, x, y);
+        } else if let Some(row) = item.and_downcast::<RowObject>() {
+            if let Some(key) = row.type_key() {
+                g.set_state(gtk::EventSequenceState::Claimed);
+                st.type_context(&w, key, row.name(), x, y);
+            }
+        }
     });
     widget.as_ref().add_controller(click);
 }
@@ -210,21 +218,28 @@ impl State {
             self.set_action_enabled(name, local);
         }
         *self.ctx_targets.borrow_mut() = targets;
-        let pop = gtk::PopoverMenu::from_model(Some(&ctx_menu()));
-        pop.set_parent(anchor);
-        pop.set_has_arrow(false);
-        pop.set_halign(gtk::Align::Start);
-        pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-        pop.connect_closed(|p| {
-            let p = p.clone();
-            // unparent after the menu item's action has run
-            glib::idle_add_local_once(move || p.unparent());
-        });
-        // Show it on the next idle cycle: popped up straight away, GTK measures the menu
-        // before its last section is laid out, so it came out one row short and needed scrolling.
-        glib::idle_add_local_once(move || pop.popup());
+        show_menu(anchor, &ctx_menu(), x, y);
     }
+}
 
+/// Show a menu at (x, y) in `anchor`'s coordinates.
+pub(super) fn show_menu(anchor: &gtk::Widget, model: &gio::Menu, x: f64, y: f64) {
+    let pop = gtk::PopoverMenu::from_model(Some(model));
+    pop.set_parent(anchor);
+    pop.set_has_arrow(false);
+    pop.set_halign(gtk::Align::Start);
+    pop.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+    pop.connect_closed(|p| {
+        let p = p.clone();
+        // unparent after the menu item's action has run
+        glib::idle_add_local_once(move || p.unparent());
+    });
+    // Show it on the next idle cycle: popped up straight away, GTK measures the menu
+    // before its last section is laid out, so it came out one row short and needed scrolling.
+    glib::idle_add_local_once(move || pop.popup());
+}
+
+impl State {
     /// Right-click on a list row. In multi-selection lists the click joins (or replaces)
     /// the selection, like in Files; the menu then acts on every selected row.
     fn row_context(self: &Rc<Self>, cell: &gtk::Widget, pos: u32, t: Target, x: f64, y: f64) {
@@ -345,6 +360,11 @@ impl State {
     // ---------------------------------------------------------------- trash
 
     pub fn trash(self: &Rc<Self>, targets: Vec<Target>) {
+        self.trash_titled(targets, None, None);
+    }
+
+    /// Ask, then move `targets` to the Trash. `heading` and `intro` replace the default wording.
+    pub(super) fn trash_titled(self: &Rc<Self>, targets: Vec<Target>, heading: Option<String>, intro: Option<String>) {
         if targets.is_empty() {
             return;
         }
@@ -368,12 +388,15 @@ impl State {
                 targets.iter().map(|t| t.size(&tree, ondisk)).sum::<u64>(),
             )
         };
-        let heading = if paths.len() == 1 {
+        let heading = if let Some(h) = heading {
+            h
+        } else if paths.len() == 1 {
             format!("Move “{}” to the Trash?", paths[0].file_name().unwrap_or_default().to_string_lossy())
         } else {
             format!("Move {} items to the Trash?", paths.len())
         };
-        let mut body: String = paths.iter().take(8).map(|p| format!("{}\n", p.display())).collect();
+        let mut body = intro.map(|i| format!("{i}\n\n")).unwrap_or_default();
+        body.extend(paths.iter().take(8).map(|p| format!("{}\n", p.display())));
         if paths.len() > 8 {
             body.push_str(&format!("… and {} more\n", paths.len() - 8));
         }

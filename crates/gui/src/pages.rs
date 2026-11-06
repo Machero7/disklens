@@ -117,6 +117,8 @@ impl ListPage {
 }
 
 pub struct Pages {
+    /// Over the Biggest list while it shows a single file type.
+    pub banner: adw::Banner,
     pub biggest: ListPage,
     pub types: ListPage,
     pub ages: ListPage,
@@ -124,7 +126,9 @@ pub struct Pages {
 
 impl Pages {
     pub fn new() -> Self {
-        Pages {
+        let banner = adw::Banner::builder().button_label("Show All Types").action_name("win.type-filter-clear").build();
+        let p = Pages {
+            banner: banner.clone(),
             biggest: ListPage::new(
                 &[Col::Name("Name"), Col::Size, Col::Share, Col::Detail("Folder", 0), Col::Modified, Col::Type],
                 true,
@@ -132,7 +136,9 @@ impl Pages {
             ),
             types: ListPage::new(&[Col::Name("Type"), Col::Detail("Extension", 120), Col::Size, Col::Share, Col::Files], true, false),
             ages: ListPage::new(&[Col::Name("Last modified"), Col::Size, Col::Share, Col::Files], false, true),
-        }
+        };
+        p.biggest.widget.prepend(&banner);
+        p
     }
 
     pub fn is_stats_page(name: &str) -> bool {
@@ -149,8 +155,9 @@ impl Pages {
         show_hidden: bool,
         now: i64,
         kind: &dyn Fn(&str) -> (String, gio::Icon),
+        only: Option<(&str, &str)>,
     ) {
-        let st = stats::compute(tree, root, ondisk, TOP_N, show_hidden, now);
+        let st = stats::compute_filtered(tree, root, ondisk, TOP_N, show_hidden, now, only.map(|o| o.0));
         let root_path = tree.path(root);
         let root_name = if tree.get(root).parent == disklens_core::NONE {
             root_path.display().to_string()
@@ -175,8 +182,24 @@ impl Pages {
             .collect();
         let top_sum: u64 = rows.iter().map(|r| r.size()).sum();
         let pct = if st.total > 0 { top_sum as f64 * 100.0 / st.total as f64 } else { 0.0 };
-        let nfiles: u64 = st.exts.values().map(|e| e.count).sum();
-        let text = if rows.len() as u64 >= nfiles {
+        let (nfiles, all_size) = match only {
+            Some((ext, _)) => st.exts.get(ext).map(|e| (e.count, e.size)).unwrap_or((0, 0)),
+            None => (st.exts.values().map(|e| e.count).sum(), st.total),
+        };
+        let text = if let Some((_, desc)) = only {
+            if nfiles == 0 {
+                format!("No {desc} files in {root_name}.")
+            } else if rows.len() as u64 >= nfiles {
+                format!("All {} {desc} files in {root_name}, {}, biggest first.", fmt_int(nfiles), human(all_size))
+            } else {
+                format!(
+                    "The {} biggest of {} {desc} files in {root_name}, which take {} in all.",
+                    fmt_int(rows.len() as u64),
+                    fmt_int(nfiles),
+                    human(all_size)
+                )
+            }
+        } else if rows.len() as u64 >= nfiles {
             format!("All {} files in {root_name}, biggest first.", fmt_int(nfiles))
         } else {
             format!(
@@ -199,11 +222,18 @@ impl Pages {
                 let (desc, icon) = kind(&e.sample);
                 let row = RowObject::summary(&desc, ext, "text-x-generic-symbolic", e.size, st.total, e.count, i as i64);
                 row.set_gicon(Some(icon));
+                row.set_type_key(ext);
                 row.set_rank((i < 4 && e.size > 0).then_some(i));
                 row
             })
             .collect();
-        self.types.set_rows(&rows, &format!("{} file types in {root_name}.", fmt_int(rows.len() as u64)));
+        self.types.set_rows(
+            &rows,
+            &format!(
+                "{} file types in {root_name}. Double-click a type to see its files; right-click for more.",
+                fmt_int(rows.len() as u64)
+            ),
+        );
 
         // File ages, oldest group last
         let rows: Vec<RowObject> = AGE_BUCKETS

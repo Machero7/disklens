@@ -48,6 +48,8 @@ mod imp {
         pub sort_files: Cell<i64>,
         pub sort_mtime: Cell<i64>,
         pub cache: Cell<Option<(u64, u64, u64, i64, bool)>>,
+        /// For rows on the Types tab: the extension key the row stands for.
+        pub type_key: RefCell<Option<String>>,
     }
 
     #[glib::object_subclass]
@@ -126,6 +128,14 @@ impl RowObject {
         r.set_pct_text(format!("{:.1} %", frac * 100.0));
         r.set_files_text(fmt_int(count));
         r
+    }
+
+    pub fn type_key(&self) -> Option<String> {
+        self.imp().type_key.borrow().clone()
+    }
+
+    pub fn set_type_key(&self, key: &str) {
+        *self.imp().type_key.borrow_mut() = Some(key.to_string());
     }
 
     pub fn is_dir(&self) -> bool {
