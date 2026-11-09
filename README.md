@@ -38,13 +38,18 @@ On the Types tab, double-click a type (or right-click → Show Files) to list on
 files on the Biggest tab; a banner offers Show All Types. Right-click → Move All to Trash… moves
 every file of that type in the current folder and its subfolders to the Trash, after asking.
 
-Right-click any file or folder: Open, Show in File Manager, Open Terminal Here, Copy Path,
+Cut, Copy and Paste (right-click, or Ctrl+X / Ctrl+C / Ctrl+V) move and copy files between folders.
+They use the same clipboard format as GNOME Files, so you can cut in DiskLens and paste in Files or the
+other way round. Pasting never overwrites: a taken name becomes `name (2).ext`. Moves across drives copy
+first and delete the original only after the copy worked.
+
+Right-click any file or folder: Open, Show in File Manager, Open Terminal Here, Cut, Copy, Paste Into Folder, Copy Path,
 Go to Folder, Rescan, Move to Trash. Trash can be undone (toast button or Ctrl+Z).
 
 Search: press Ctrl+F (or just start typing) to filter the Folder, Biggest and Types lists by
 name; Esc closes the search.
 
-Shortcuts: Ctrl+O scan · Ctrl+F search · F5 rescan · Esc stop · Alt+Up parent · Delete trash ·
+Shortcuts: Ctrl+O scan · Ctrl+F search · Ctrl+X/C/V cut, copy, paste · F5 rescan · Esc stop · Alt+Up parent · Delete trash ·
 Ctrl+Z undo · Ctrl+E export CSV · Ctrl+, preferences · Ctrl+? all shortcuts.
 
 Settings live in `~/.config/disklens/settings.json` (shared with the Python version).

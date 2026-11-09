@@ -125,6 +125,17 @@ impl Tree {
         p
     }
 
+    /// The folder at `path` (absolute, inside the scanned folder), if it has been scanned.
+    pub fn dir_for_path(&self, path: &Path) -> Option<u32> {
+        let rel = path.strip_prefix(self.path(Self::ROOT)).ok()?;
+        let mut id = Self::ROOT;
+        for part in rel.components() {
+            let name = part.as_os_str().as_bytes();
+            id = *self.get(id).dirs.iter().find(|&&c| &*self.get(c).name == name)?;
+        }
+        Some(id)
+    }
+
     pub fn file_path(&self, dir: u32, f: &FileEntry) -> PathBuf {
         let mut p = self.path(dir);
         p.push(OsStr::from_bytes(self.get(dir).file_name_bytes(f)));

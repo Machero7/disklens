@@ -23,6 +23,8 @@ mod dupes;
 mod remote_ui;
 #[path = "types_ui.rs"]
 mod types_ui;
+#[path = "clipboard_ui.rs"]
+mod clipboard_ui;
 
 use crate::mounts;
 use crate::pages::Pages;
@@ -471,6 +473,7 @@ pub fn build(app: &adw::Application) -> Rc<State> {
     dupes::wire(&state);
     remote_ui::add_actions(&state);
     types_ui::add_actions(&state);
+    clipboard_ui::add_actions(&state);
     state
 }
 
