@@ -39,6 +39,9 @@ mod imp {
         /// CSS classes for the accent wrapper around the icon and bar ("accent-0".."accent-3", "accent-none").
         #[property(get, set)]
         pub accent: RefCell<Vec<String>>,
+        /// Cut and waiting to be pasted: the row is shown faded.
+        #[property(get, set)]
+        pub cut: Cell<bool>,
 
         pub dir: Cell<u32>,
         pub file: Cell<u32>,

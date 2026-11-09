@@ -15,7 +15,7 @@ use super::State;
 use crate::row::RowObject;
 
 /// A folder (by id) or a file (folder id, index into its files).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Target {
     Dir(u32),
     File(u32, u32),
@@ -119,13 +119,17 @@ fn ctx_menu() -> gio::Menu {
     s1.append(Some("Open"), Some("win.ctx-open"));
     s1.append(Some("Show in File Manager"), Some("win.ctx-reveal"));
     s1.append(Some("Open Terminal Here"), Some("win.ctx-terminal"));
-    s1.append(Some("Copy Path"), Some("win.ctx-copy"));
+    let clip = gio::Menu::new();
+    clip.append(Some("Cut"), Some("win.ctx-cut"));
+    clip.append(Some("Copy"), Some("win.ctx-copy"));
+    clip.append(Some("Paste Into Folder"), Some("win.ctx-paste"));
+    clip.append(Some("Copy Path"), Some("win.ctx-copy-path"));
     let s2 = gio::Menu::new();
     s2.append(Some("Go to Folder"), Some("win.ctx-goto"));
     s2.append(Some("Rescan"), Some("win.ctx-rescan"));
     let s3 = gio::Menu::new();
     s3.append(Some("Move to Trash"), Some("win.ctx-trash"));
-    for s in [s1, s2, s3] {
+    for s in [s1, clip, s2, s3] {
         menu.append_section(None, &s);
     }
     menu
@@ -150,7 +154,7 @@ pub fn add_actions(st: &Rc<State>) {
     add("ctx-open", &[], |st| st.with_first(|st, t| st.open_default(t)));
     add("ctx-reveal", &[], |st| st.with_first(|st, t| st.reveal(t)));
     add("ctx-terminal", &[], |st| st.with_first(|st, t| st.open_terminal(t)));
-    add("ctx-copy", &[], |st| {
+    add("ctx-copy-path", &[], |st| {
         let paths: Vec<String> = {
             let tree = st.tree.borrow();
             let host = st.remote.borrow().as_ref().and_then(|r| r.host.clone());
@@ -177,13 +181,7 @@ pub fn add_actions(st: &Rc<State>) {
         let targets = st.ctx_targets.borrow().clone();
         st.trash(targets);
     });
-    add("undo", &["<Control>z"], |st| {
-        let last = st.last_trash.borrow_mut().take();
-        match last {
-            Some((paths, parents)) => st.undo_trash(paths, parents),
-            None => st.toast("Nothing to undo"),
-        }
-    });
+    add("undo", &["<Control>z"], |st| st.undo_last());
     add("trash-selection", &["Delete"], |st| {
         let targets = st.selected_targets();
         st.trash(targets);
@@ -214,9 +212,12 @@ impl State {
         let local = !self.is_remote(); // a NAS scan only looks: these would act on this computer
         self.set_action_enabled("ctx-rescan", !scanning);
         self.set_action_enabled("ctx-trash", !scanning && !has_root && local);
-        for name in ["ctx-open", "ctx-reveal", "ctx-terminal"] {
+        for name in ["ctx-open", "ctx-reveal", "ctx-terminal", "ctx-copy"] {
             self.set_action_enabled(name, local);
         }
+        self.set_action_enabled("ctx-cut", local && !has_root);
+        // paste goes into the right-clicked folder (or the folder a right-clicked file is in)
+        self.set_action_enabled("ctx-paste", local && !scanning && super::clipboard_ui::clipboard_has_files(&self.ui.window));
         *self.ctx_targets.borrow_mut() = targets;
         show_menu(anchor, &ctx_menu(), x, y);
     }
@@ -264,7 +265,7 @@ impl State {
     }
 
     /// Selected rows of the list on the visible tab (Folder or Biggest), for the Delete key.
-    fn selected_targets(&self) -> Vec<Target> {
+    pub(super) fn selected_targets(&self) -> Vec<Target> {
         let view = match self.ui.view_stack.visible_child_name().as_deref() {
             Some("contents") => &self.ui.contents_view,
             Some("biggest") => &self.ui.pages.biggest.view,
@@ -482,25 +483,12 @@ impl State {
             } else {
                 format!("Moved {} items ({}) to the Trash", done.len(), human(freed))
             };
-            let toast = adw::Toast::builder().title(text).timeout(10).build();
-            if !permanent {
-                toast.set_button_label(Some("Undo"));
-                let w = Rc::downgrade(self);
+            if permanent {
+                self.toast(&text);
+            } else {
                 let restore: Vec<PathBuf> = done.iter().map(|(_, p)| p.clone()).collect();
-                *self.last_trash.borrow_mut() = Some((restore, parents));
-                toast.connect_button_clicked(move |_| {
-                    if let Some(st) = w.upgrade() {
-                        if let Some((p, d)) = st.last_trash.borrow_mut().take() {
-                            st.undo_trash(p, d);
-                        }
-                    }
-                });
-            }
-            if let Some(o) = self.ui.window.content().and_downcast::<adw::ToastOverlay>() {
-                o.add_toast(toast.clone());
-            }
-            if let Some(old) = self.trash_toast.replace(Some(toast)) {
-                old.dismiss();
+                *self.last_op.borrow_mut() = Some(super::LastOp::Trash(restore, parents));
+                self.undo_toast(text);
             }
         }
         if !failed.is_empty() {
@@ -580,11 +568,42 @@ impl State {
         }
     }
 
-    /// Put trashed items back, then rescan the folder that holds them all.
-    fn undo_trash(self: &Rc<Self>, paths: Vec<PathBuf>, parents: Vec<u32>) {
-        if let Some(t) = self.trash_toast.take() {
+    /// A message with an Undo button for the operation just recorded in `last_op`.
+    pub(super) fn undo_toast(self: &Rc<Self>, text: String) {
+        let toast = adw::Toast::builder().title(text).timeout(10).button_label("Undo").build();
+        let w = Rc::downgrade(self);
+        toast.connect_button_clicked(move |_| {
+            if let Some(st) = w.upgrade() {
+                st.undo_last();
+            }
+        });
+        if let Some(o) = self.ui.window.content().and_downcast::<adw::ToastOverlay>() {
+            o.add_toast(toast.clone());
+        }
+        if let Some(old) = self.undo_toast.replace(Some(toast)) {
+            old.dismiss();
+        }
+    }
+
+    /// Undo the last trash or paste (Ctrl+Z, or the toast's Undo button).
+    pub(super) fn undo_last(self: &Rc<Self>) {
+        if let Some(t) = self.undo_toast.take() {
             t.dismiss();
         }
+        if self.is_scanning() {
+            self.toast("Wait for the scan to finish before undoing");
+            return;
+        }
+        let last = self.last_op.borrow_mut().take();
+        match last {
+            Some(super::LastOp::Trash(paths, parents)) => self.undo_trash(paths, parents),
+            Some(super::LastOp::Paste { cut, items }) => self.undo_paste(cut, items),
+            None => self.toast("Nothing to undo"),
+        }
+    }
+
+    /// Put trashed items back, then rescan the folder that holds them all.
+    fn undo_trash(self: &Rc<Self>, paths: Vec<PathBuf>, parents: Vec<u32>) {
         if self.is_scanning() {
             self.toast("Wait for the scan to finish before undoing");
             return;
@@ -660,7 +679,7 @@ fn remove_where(store: &gio::ListStore, pred: &dyn Fn(&RowObject) -> bool) {
 }
 
 /// Deepest folder containing all of `dirs` (NONE if the list is empty).
-fn common_ancestor(tree: &Tree, dirs: &[u32]) -> u32 {
+pub(super) fn common_ancestor(tree: &Tree, dirs: &[u32]) -> u32 {
     let chain = |d: u32| {
         let mut v = Vec::new();
         let mut n = d;

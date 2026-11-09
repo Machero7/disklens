@@ -174,3 +174,14 @@ fn biggest_filtered_by_type_and_files_of_type() {
     let bins: Vec<String> = stats::files_of_type(&tree, b, ".bin", true).iter().map(name).collect();
     assert_eq!(bins, vec!["big.bin"]);
 }
+
+#[test]
+fn dir_for_path_finds_scanned_folders() {
+    let t = fixture();
+    let (tree, _) = scan_blocking(t.path(), ScanOptions::default()).unwrap();
+    let c = child(&tree, child(&tree, Tree::ROOT, "b"), "c");
+    assert_eq!(tree.dir_for_path(t.path()), Some(Tree::ROOT));
+    assert_eq!(tree.dir_for_path(&t.path().join("b/c")), Some(c));
+    assert_eq!(tree.dir_for_path(&t.path().join("b/nope")), None);
+    assert_eq!(tree.dir_for_path(Path::new("/somewhere/else")), None);
+}

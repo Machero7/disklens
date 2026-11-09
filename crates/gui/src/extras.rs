@@ -177,7 +177,7 @@ impl State {
         let shortcuts = [
             ("General", vec![("<Control>o", "Scan a folder"), ("<Control>f", "Search (or just start typing)"), ("F5", "Rescan this folder"), ("Escape", "Stop the scan"), ("<Control>comma", "Preferences"), ("<Control>question", "Keyboard shortcuts")]),
             ("Navigation", vec![("<Alt>Up", "Parent folder"), ("Return", "Open the selected folder or file")]),
-            ("Files", vec![("Delete", "Move selection to the Trash"), ("<Control>z", "Undo the last Move to Trash"), ("<Control>e", "Export the list to CSV")]),
+            ("Files", vec![("<Control>x", "Cut the selection"), ("<Control>c", "Copy the selection"), ("<Control>v", "Paste into the folder you're viewing"), ("Delete", "Move selection to the Trash"), ("<Control>z", "Undo the last Move to Trash"), ("<Control>e", "Export the list to CSV")]),
         ];
         let mut xml = String::from(
             r#"<interface><object class="GtkShortcutsWindow" id="w"><property name="modal">1</property><child><object class="GtkShortcutsSection"><property name="section-name">main</property>"#,

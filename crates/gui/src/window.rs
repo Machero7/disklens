@@ -23,6 +23,8 @@ mod dupes;
 mod remote_ui;
 #[path = "types_ui.rs"]
 mod types_ui;
+#[path = "clipboard_ui.rs"]
+mod clipboard_ui;
 
 use crate::mounts;
 use crate::pages::Pages;
@@ -83,6 +85,14 @@ struct Contents {
     files_added: bool,
 }
 
+/// Something Undo can reverse.
+pub enum LastOp {
+    /// Paths moved to the Trash, and the folders they were in.
+    Trash(Vec<PathBuf>, Vec<u32>),
+    /// A paste: moved (`cut`) or copied items.
+    Paste { cut: bool, items: Vec<disklens_core::fileops::Pasted> },
+}
+
 pub struct State {
     pub ui: Ui,
     tree: RefCell<Tree>,
@@ -119,8 +129,12 @@ pub struct State {
     /// What the open context menu acts on.
     ctx_targets: RefCell<Vec<actions::Target>>,
     /// Last trashed paths and their folders, for Undo / Ctrl+Z.
-    last_trash: RefCell<Option<(Vec<PathBuf>, Vec<u32>)>>,
-    trash_toast: RefCell<Option<adw::Toast>>,
+    /// The last trash or paste, for Undo / Ctrl+Z, and the toast that offers it.
+    last_op: RefCell<Option<LastOp>>,
+    undo_toast: RefCell<Option<adw::Toast>>,
+    /// Items cut and not yet pasted: shown faded. `cut_shown` = some row is currently faded.
+    cut_set: RefCell<std::collections::HashSet<actions::Target>>,
+    cut_shown: Cell<bool>,
     settings: RefCell<Settings>,
     /// Progress of the running duplicate search, if any.
     dup_progress: RefCell<Option<std::sync::Arc<disklens_core::dups::Progress>>>,
@@ -454,8 +468,10 @@ pub fn build(app: &adw::Application) -> Rc<State> {
         map_gen: Cell::new(0),
         map_cache: RefCell::new(None),
         ctx_targets: RefCell::new(Vec::new()),
-        last_trash: RefCell::new(None),
-        trash_toast: RefCell::new(None),
+        last_op: RefCell::new(None),
+        undo_toast: RefCell::new(None),
+        cut_set: RefCell::new(std::collections::HashSet::new()),
+        cut_shown: Cell::new(false),
         settings: RefCell::new(settings),
         dup_progress: RefCell::new(None),
         remote: RefCell::new(None),
@@ -471,6 +487,7 @@ pub fn build(app: &adw::Application) -> Rc<State> {
     dupes::wire(&state);
     remote_ui::add_actions(&state);
     types_ui::add_actions(&state);
+    clipboard_ui::add_actions(&state);
     state
 }
 
@@ -516,8 +533,18 @@ fn side_factory() -> gtk::SignalListItemFactory {
         row.chain_property::<RowObject>("name").bind(&name, "label", gtk::Widget::NONE);
         row.chain_property::<RowObject>("size-text").bind(&size, "label", gtk::Widget::NONE);
         row.chain_property::<RowObject>("gicon").bind(&icon, "gicon", gtk::Widget::NONE);
+        dim_when_cut(row.upcast_ref(), &b);
     });
     f
+}
+
+/// Fade `w` while its row is cut (waiting to be pasted), like GNOME Files does.
+fn dim_when_cut(row: &gtk::Expression, w: &impl IsA<gtk::Widget>) {
+    gtk::ClosureExpression::new::<f64>(
+        [row.chain_property::<RowObject>("cut")],
+        glib::closure!(|_: Option<glib::Object>, cut: bool| if cut { 0.4 } else { 1.0 }),
+    )
+    .bind(w.upcast_ref::<gtk::Widget>(), "opacity", gtk::Widget::NONE);
 }
 
 pub(crate) fn sorter(cmp: impl Fn(&RowObject, &RowObject) -> std::cmp::Ordering + 'static) -> gtk::CustomSorter {
@@ -537,7 +564,9 @@ pub(crate) fn label_cell(prop: &'static str, xalign: f32, dim: bool) -> gtk::Sig
         }
         li.set_child(Some(&l));
         actions::attach_ctx(&l, li);
-        li.property_expression("item").chain_property::<RowObject>(prop).bind(&l, "label", gtk::Widget::NONE);
+        let item = li.property_expression("item");
+        item.chain_property::<RowObject>(prop).bind(&l, "label", gtk::Widget::NONE);
+        dim_when_cut(&item, &l);
     });
     f
 }
@@ -560,6 +589,7 @@ pub(crate) fn name_cell() -> gtk::SignalListItemFactory {
         item.chain_property::<RowObject>("gicon").bind(&icon, "gicon", gtk::Widget::NONE);
         item.chain_property::<RowObject>("accent").bind(&wrap, "css-classes", gtk::Widget::NONE);
         item.chain_property::<RowObject>("name").bind(&name, "label", gtk::Widget::NONE);
+        dim_when_cut(&item, &b);
     });
     name_f
 }
@@ -584,6 +614,7 @@ pub(crate) fn share_cell() -> gtk::SignalListItemFactory {
         let item = li.property_expression("item");
         item.chain_property::<RowObject>("fraction").bind(&bar, "fraction", gtk::Widget::NONE);
         item.chain_property::<RowObject>("pct-text").bind(&pct, "label", gtk::Widget::NONE);
+        dim_when_cut(&item, &b);
         // "share" + accent-N: the class list is rebuilt from the row's accent
         let classes = item.chain_property::<RowObject>("accent");
         gtk::ClosureExpression::new::<Vec<String>>(
@@ -968,6 +999,7 @@ impl State {
         }
         *self.remote.borrow_mut() = None;
         *self.fatal.borrow_mut() = None;
+        self.cut_set.borrow_mut().clear();
         self.set_type_filter(None);
         let dev = std::fs::metadata(&path).ok().map(|m| std::os::unix::fs::MetadataExt::dev(&m));
         self.root_dev.set(dev);
@@ -1007,6 +1039,7 @@ impl State {
             return;
         }
         self.dups_reset();
+        self.cut_set.borrow_mut().clear();
         let path = {
             let mut tree = self.tree.borrow_mut();
             tree.reset(dir);
@@ -1151,6 +1184,7 @@ impl State {
             return None;
         }
         let store = gio::ListStore::new::<RowObject>();
+        self.mark_cut(rows.iter());
         store.extend_from_slice(&rows);
         self.side_stores.borrow_mut().insert(dir, (store.clone(), n));
         Some(store.upcast())
@@ -1195,6 +1229,7 @@ impl State {
         self.invalidate_map();
         self.dups_update_where();
         self.update_search_count();
+        self.refresh_cut_marks();
     }
 
     /// For the screenshot walk-through: open the search bar with `text` ("" closes it).
@@ -1293,6 +1328,7 @@ impl State {
         self.ui.pages.fill(&tree, self.current.get(), self.ondisk.get(), self.show_hidden.get(), now(), &kind, only);
         drop(tree);
         self.update_search_count();
+        self.refresh_cut_marks();
         // measured after filling, so a slow fill can't hog the main loop during a scan
         self.stats_at.set(glib::monotonic_time());
     }
@@ -1420,6 +1456,7 @@ impl State {
         self.refresh_stats(self.scanner.borrow().is_none());
         self.invalidate_map();
         self.update_search_count();
+        self.refresh_cut_marks();
     }
 
     /// Hidden-files toggle: rebuild the sidebar and Contents from scratch.
