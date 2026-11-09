@@ -42,6 +42,8 @@ Cut, Copy and Paste (right-click, or Ctrl+X / Ctrl+C / Ctrl+V) move and copy fil
 They use the same clipboard format as GNOME Files, so you can cut in DiskLens and paste in Files or the
 other way round. Pasting never overwrites: a taken name becomes `name (2).ext`. Moves across drives copy
 first and delete the original only after the copy worked.
+Cut items are shown faded until they're pasted. Undo (the toast's button, or Ctrl+Z) reverses the
+last paste: moved items go back where they were, copies go to the Trash.
 
 Right-click any file or folder: Open, Show in File Manager, Open Terminal Here, Cut, Copy, Paste Into Folder, Copy Path,
 Go to Folder, Rescan, Move to Trash. Trash can be undone (toast button or Ctrl+Z).

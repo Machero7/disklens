@@ -101,19 +101,41 @@ pub fn move_into(src: &Path, dest_dir: &Path) -> io::Result<Pasted> {
         check_not_inside(src, dest_dir)?;
     }
     let to = free_name(dest_dir, name, is_dir);
-    match fs::rename(src, &to) {
-        Ok(()) => {}
-        // another drive: copy, and delete the original only once the copy is complete
+    move_path(src, &to)?;
+    Ok(Pasted { from: src.to_path_buf(), renamed: to.file_name() != Some(name), to })
+}
+
+/// Move `src` to exactly `to` (which must not exist): a rename on the same drive; on another
+/// drive, copy and delete the original only once the copy is complete.
+fn move_path(src: &Path, to: &Path) -> io::Result<()> {
+    match fs::rename(src, to) {
+        Ok(()) => Ok(()),
         Err(e) if e.raw_os_error() == Some(18) => {
-            if let Err(e) = copy_tree(src, &to) {
-                let _ = remove_tree(&to);
+            if let Err(e) = copy_tree(src, to) {
+                let _ = remove_tree(to);
                 return Err(e);
             }
-            remove_tree(src)?;
+            remove_tree(src)
         }
-        Err(e) => return Err(e),
+        Err(e) => Err(e),
     }
-    Ok(Pasted { from: src.to_path_buf(), renamed: to.file_name() != Some(name), to })
+}
+
+/// Undo a move: put `p.to` back at `p.from`. If something new took that name meanwhile,
+/// it goes next to it as `name (2)` instead. Returns where it ended up.
+pub fn undo_move(p: &Pasted) -> io::Result<PathBuf> {
+    if p.from == p.to {
+        return Ok(p.to.clone()); // it never moved
+    }
+    let is_dir = fs::symlink_metadata(&p.to)?.is_dir();
+    let dir = p.from.parent().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no parent folder"))?;
+    if !dir.is_dir() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, format!("{} no longer exists", dir.display())));
+    }
+    let name = p.from.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?;
+    let back = free_name(dir, name, is_dir);
+    move_path(&p.to, &back)?;
+    Ok(back)
 }
 
 #[cfg(test)]
@@ -171,6 +193,27 @@ mod tests {
         let p = move_into(&b.join("album"), &b).unwrap();
         assert_eq!(p.to, b.join("album"));
         assert!(b.join("album").exists() && !b.join("album (2)").exists());
+    }
+
+    #[test]
+    fn undo_move_puts_things_back() {
+        let (_t, a, b) = setup();
+        let p = move_into(&a.join("album"), &b).unwrap();
+        assert_eq!(undo_move(&p).unwrap(), a.join("album"));
+        assert!(a.join("album/disc 1/01.flac").exists() && !b.join("album").exists());
+
+        // something new took the name meanwhile: nothing is overwritten
+        let p = move_into(&a.join("report.pdf"), &b).unwrap();
+        fs::write(a.join("report.pdf"), b"new").unwrap();
+        assert_eq!(undo_move(&p).unwrap(), a.join("report (2).pdf"));
+        assert_eq!(fs::read(a.join("report.pdf")).unwrap(), b"new");
+        assert_eq!(fs::read(a.join("report (2).pdf")).unwrap(), b"pdf");
+
+        // the original folder is gone: a clear error, the item stays put
+        let p = move_into(&a.join("report (2).pdf"), &b).unwrap();
+        fs::remove_dir_all(&a).unwrap();
+        assert!(undo_move(&p).is_err());
+        assert!(p.to.exists());
     }
 
     #[test]

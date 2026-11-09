@@ -12,7 +12,8 @@ use disklens_core::{Tree, NONE};
 use gtk::{gdk, gio, glib};
 
 use super::actions::{common_ancestor, Target};
-use super::State;
+use super::{LastOp, State};
+use crate::row::RowObject;
 
 const GNOME_FILES: &str = "x-special/gnome-copied-files";
 const URI_LIST: &str = "text/uri-list";
@@ -57,6 +58,16 @@ pub fn add_actions(st: &Rc<State>) {
         st.put_on_clipboard(&t, false);
     });
     add("paste", &["<Control>v"], |st| st.paste_into(st.current.get()));
+
+    // something else was put on the clipboard (here or in another app): the cut is off
+    let w = Rc::downgrade(st);
+    st.ui.window.clipboard().connect_changed(move |cb| {
+        if let Some(st) = w.upgrade() {
+            if !cb.is_local() {
+                st.clear_cut();
+            }
+        }
+    });
 }
 
 /// The clipboard holds files or folders (from DiskLens, GNOME Files or another file manager).
@@ -104,6 +115,8 @@ impl State {
             self.toast("Couldn't use the clipboard");
             return;
         }
+        *self.cut_set.borrow_mut() = if cut { targets.iter().copied().collect() } else { Default::default() };
+        self.refresh_cut_marks();
         let what = if paths.len() == 1 {
             format!("“{}”", paths[0].file_name().unwrap_or_default().to_string_lossy())
         } else {
@@ -174,6 +187,14 @@ impl State {
             // the originals are gone, so the clipboard no longer points at anything
             self.ui.window.clipboard().set_content(None::<&gdk::ContentProvider>).ok();
         }
+        if cut {
+            self.clear_cut();
+        }
+        // what Undo reverses (a move to the folder an item was already in changed nothing)
+        let undoable: Vec<fileops::Pasted> = done.iter().filter(|p| p.from != p.to).map(|p| (*p).clone()).collect();
+        if !undoable.is_empty() {
+            *self.last_op.borrow_mut() = Some(LastOp::Paste { cut, items: undoable });
+        }
 
         // refresh the smallest part of the scan holding the destination and every source folder
         let folders: Vec<u32> = {
@@ -201,7 +222,11 @@ impl State {
             msg.push_str(&format!(" · {renamed} renamed so nothing was overwritten"));
         }
         if !msg.is_empty() {
-            self.toast(&msg);
+            if self.last_op.borrow().is_some() && n > 0 {
+                self.undo_toast(msg);
+            } else {
+                self.toast(&msg);
+            }
         }
         if !errors.is_empty() {
             let mut body = errors.iter().take(12).map(|e| e.as_str()).collect::<Vec<_>>().join("\n");
@@ -212,6 +237,107 @@ impl State {
             dlg.add_response("ok", "_OK");
             dlg.present(Some(&self.ui.window));
         }
+    }
+}
+
+impl State {
+    /// Undo a paste: move items back where they came from, or move copies to the Trash.
+    pub(super) fn undo_paste(self: &Rc<Self>, cut: bool, items: Vec<fileops::Pasted>) {
+        let w = Rc::downgrade(self);
+        self.ui.progress.set_visible(true);
+        self.ui.progress.pulse();
+        let work = items.clone();
+        glib::spawn_future_local(async move {
+            let errors: Vec<String> = gio::spawn_blocking(move || {
+                work.iter()
+                    .filter_map(|p| {
+                        let r = if cut {
+                            fileops::undo_move(p).map(|_| ())
+                        } else if std::fs::symlink_metadata(&p.from).is_err() {
+                            // the original is gone: the copy is the last one, so keep it
+                            Err(std::io::Error::other("the original no longer exists, so the copy was kept"))
+                        } else {
+                            match gio::File::for_path(&p.to).trash(None::<&gio::Cancellable>) {
+                                Ok(()) => Ok(()),
+                                // no Trash on that drive: it's a copy of a file that still exists
+                                Err(e) if e.matches(gio::IOErrorEnum::NotSupported) => {
+                                    if std::fs::symlink_metadata(&p.to).map(|m| m.is_dir()).unwrap_or(false) {
+                                        std::fs::remove_dir_all(&p.to)
+                                    } else {
+                                        std::fs::remove_file(&p.to)
+                                    }
+                                }
+                                Err(e) => Err(std::io::Error::other(e.message().to_string())),
+                            }
+                        };
+                        r.err().map(|e| format!("{}: {e}", p.to.display()))
+                    })
+                    .collect()
+            })
+            .await
+            .unwrap_or_default();
+            let Some(st) = w.upgrade() else { return };
+            st.ui.progress.set_visible(false);
+            let folders: Vec<u32> = {
+                let tree = st.tree.borrow();
+                items
+                    .iter()
+                    .flat_map(|p| [p.from.parent(), p.to.parent()])
+                    .flatten()
+                    .filter_map(|d| tree.dir_for_path(d))
+                    .collect()
+            };
+            let common = { common_ancestor(&st.tree.borrow(), &folders) };
+            if common != NONE {
+                st.rescan(common);
+            }
+            if errors.is_empty() {
+                st.toast(if cut { "Moved back" } else { "Moved the copies to the Trash" });
+            } else {
+                let dlg = adw::AlertDialog::new(Some("Some items couldn't be undone"), Some(&errors.join("\n")));
+                dlg.add_response("ok", "_OK");
+                dlg.present(Some(&st.ui.window));
+            }
+        });
+    }
+
+    /// Forget the cut items (pasted, replaced on the clipboard, or the scan changed).
+    pub(super) fn clear_cut(&self) {
+        if self.cut_set.borrow().is_empty() {
+            return;
+        }
+        self.cut_set.borrow_mut().clear();
+        self.refresh_cut_marks();
+    }
+
+    /// Set the faded look on `rows` from the cut set.
+    pub(super) fn mark_cut<'a>(&self, rows: impl Iterator<Item = &'a RowObject>) {
+        let set = self.cut_set.borrow();
+        for r in rows {
+            let cut = !set.is_empty() && Target::from_row(r).is_some_and(|t| set.contains(&t));
+            if r.cut() != cut {
+                r.set_cut(cut);
+            }
+        }
+    }
+
+    /// Update the faded look on every row currently in a list.
+    pub(super) fn refresh_cut_marks(&self) {
+        let any = !self.cut_set.borrow().is_empty();
+        if !any && !self.cut_shown.get() {
+            return; // nothing cut and nothing faded: skip the walk
+        }
+        let mut rows: Vec<RowObject> = Vec::new();
+        if let Some(c) = self.contents.borrow().as_ref() {
+            rows.extend(c.store.iter::<RowObject>().flatten());
+        }
+        for (store, _) in self.side_stores.borrow().values() {
+            rows.extend(store.iter::<RowObject>().flatten());
+        }
+        rows.extend(self.ui.side_root.iter::<RowObject>().flatten());
+        rows.extend(self.ui.pages.biggest.rows());
+        self.mark_cut(rows.iter());
+        self.cut_shown.set(any);
     }
 }
 

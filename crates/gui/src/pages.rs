@@ -104,6 +104,11 @@ impl ListPage {
         ListPage { widget, view, sorted, summary, store, narrow_hide }
     }
 
+    /// Every row on this page (before searching/sorting).
+    pub fn rows(&self) -> Vec<RowObject> {
+        self.store.iter::<RowObject>().flatten().collect()
+    }
+
     /// Show only rows that pass `filter` (the search bar).
     pub fn filter_with(&self, filter: &gtk::CustomFilter) {
         let fm = gtk::FilterListModel::new(Some(self.store.clone()), Some(filter.clone()));
