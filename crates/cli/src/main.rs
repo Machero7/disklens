@@ -1,6 +1,6 @@
 //! disklens-scan: scan a folder and print totals and the biggest files.
 //!
-//! Phase-0 tool for checking the engine against `du` and the Python version;
+//! Phase-0 tool for checking the engine against `du`;
 //! later the headless scanner for remote (SSH) scans.
 
 use std::path::PathBuf;
