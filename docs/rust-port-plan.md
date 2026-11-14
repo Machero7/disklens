@@ -1,5 +1,7 @@
 # DiskLens → Rust: port plan
 
+> The Python version this plan ported from was removed from the repository on 2026-11-14; it's in the git history (`git show 0788f49:python/disklens.py`).
+>
 > Written while DiskLens lived in a folder of a larger scripts repo; paths below like `disklens-rs/` and `~/claude` are from that time. The Rust workspace is now this repository's top level and the Python version is in `python/`.
 
 Status: **all phases done** (2026-11-04). Feature parity with Python v1.1 plus Undo for Trash, Ctrl+Z, theme choice and shared settings. Install with `install.sh` (see `README.md`); the Python version stays in git as a fallback. Ctrl+F search added 2026-11-04. Remote NAS scanning over SSH added 2026-11-04 (read-only; GNU find on the NAS via the system ssh; see README).

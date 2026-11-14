@@ -4,8 +4,8 @@ See what's using your disk space. A GNOME app (GTK 4 + libadwaita) for Linux, in
 TreeSize: folder sizes, biggest files, file types and ages, a treemap, a duplicate finder,
 and scanning a NAS over SSH.
 
-It's written in Rust: one native program, about 26× faster to scan than the original Python
-version (`python/disklens.py`) and using about 1/6 of the memory.
+It's written in Rust: one native program, about 26× faster to scan than the Python version it
+replaced, and using about 1/6 of the memory.
 
 ## Install
 
@@ -20,8 +20,8 @@ cd ~/disklens
 ```
 
 The installer moves older DiskLens launchers (the Python one and "DiskLens Preview") to
-`~/.local/share/disklens-old-launchers/`. The Python version still works with
-`python3 python/disklens.py`.
+`~/.local/share/disklens-old-launchers/`. The old Python version is no longer included; it's in
+the git history (`git show 0788f49:python/disklens.py`).
 
 ## What it does
 
@@ -54,7 +54,7 @@ name; Esc closes the search.
 Shortcuts: Ctrl+O scan · Ctrl+F search · Ctrl+X/C/V cut, copy, paste · F5 rescan · Esc stop · Alt+Up parent · Delete trash ·
 Ctrl+Z undo · Ctrl+E export CSV · Ctrl+, preferences · Ctrl+? all shortcuts.
 
-Settings live in `~/.config/disklens/settings.json` (shared with the Python version).
+Settings live in `~/.config/disklens/settings.json`.
 
 ## Scanning a NAS over SSH
 
