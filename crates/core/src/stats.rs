@@ -42,7 +42,7 @@ pub struct Stats {
 }
 
 /// Walk the subtree under `root`. `show_hidden=false` skips dot-files (not dot-folders' contents
-/// in totals, matching the Python version: hidden folders are still walked).
+/// in totals: hidden folders are still walked).
 pub fn compute(tree: &Tree, root: u32, ondisk: bool, top_n: usize, show_hidden: bool, now: i64) -> Stats {
     compute_filtered(tree, root, ondisk, top_n, show_hidden, now, None)
 }

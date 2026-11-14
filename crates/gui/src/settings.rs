@@ -1,5 +1,5 @@
-//! Settings in `~/.config/disklens/settings.json`, shared with the Python version.
-//! Unknown keys (ones only the Python version uses) are kept when saving.
+//! Settings in `~/.config/disklens/settings.json`.
+//! Keys this version doesn't know (some were written by the old Python version) are kept when saving.
 
 use std::path::PathBuf;
 
