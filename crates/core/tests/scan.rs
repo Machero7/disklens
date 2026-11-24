@@ -111,8 +111,12 @@ fn stats_top_exts_ages() {
     assert_eq!(st.top.len(), 3);
     assert_eq!(st.exts[".bin"].size, 50_000);
     assert_eq!(st.exts[".txt"].count, 1);
-    // 5 files: the hard link to a/two is the same file, so it is counted once
-    assert_eq!(st.ages[0].1, 5, "everything was just written");
+    // 6 names (the hard link to a/two is listed and counted as a file, like in the folder
+    // totals), but its 2000 bytes are only added once
+    assert_eq!(st.ages[0].1, 6, "everything was just written");
+    assert_eq!(st.ages[0].0, tree.get(Tree::ROOT).size);
+    assert_eq!(st.exts.values().map(|e| e.count).sum::<u64>(), tree.get(Tree::ROOT).nfiles);
+    assert_eq!(st.total, tree.get(Tree::ROOT).size);
 }
 
 #[test]
@@ -168,6 +172,13 @@ fn biggest_filtered_by_type_and_files_of_type() {
     let mut none: Vec<String> = stats::files_of_type(&tree, Tree::ROOT, disklens_core::util::NO_EXT, true).iter().map(name).collect();
     none.sort();
     assert_eq!(none, vec!["one", "three", "two", "two-link"]);
+
+    // folders holding a .bin file somewhere inside: the root, b and b/c (not a or d)
+    let (b_id, a_id) = (child(&tree, Tree::ROOT, "b"), child(&tree, Tree::ROOT, "a"));
+    let with_bin = stats::dirs_with_type(&tree, ".bin", true);
+    assert!(with_bin.contains(&Tree::ROOT) && with_bin.contains(&b_id) && with_bin.contains(&child(&tree, b_id, "c")));
+    assert!(!with_bin.contains(&a_id));
+    assert_eq!(with_bin.len(), 3);
 
     // under b/ only: b/three (no extension) and b/c/big.bin
     let b = child(&tree, Tree::ROOT, "b");

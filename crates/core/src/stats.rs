@@ -67,17 +67,18 @@ pub fn compute_filtered(
         let d = tree.get(id);
         stack.extend_from_slice(&d.dirs);
         for (i, f) in d.files.iter().enumerate() {
-            // removed: trashed after the scan; !counted: 2nd+ name of a hard-linked file,
-            // which the folder totals also count only once
-            if f.removed || !f.counted {
-                continue;
+            if f.removed {
+                continue; // trashed after the scan
             }
             let name = d.file_name(f);
             if !show_hidden && name.starts_with('.') {
                 continue;
             }
             let v = f.value(ondisk);
-            total += v;
+            // A 2nd+ name of a hard-linked file is still a file in the lists and the counts,
+            // but its bytes are only added once, exactly like the folder totals.
+            let add = if f.counted { v } else { 0 };
+            total += add;
             let r = FileRef { dir: id, idx: i as u32 };
             let ext = ext_of(&name);
             let in_top = only_ext.is_none_or(|x| x == ext);
@@ -95,14 +96,14 @@ pub fn compute_filtered(
             if e.count == 0 {
                 e.sample = name.into_owned();
             }
-            e.size += v;
+            e.size += add;
             e.count += 1;
             let days = (now - f.mtime).max(0) / 86_400;
             let b = AGE_BUCKETS
                 .iter()
                 .position(|(_, lim)| lim.map_or(true, |l| days < l as i64))
                 .unwrap();
-            ages[b].0 += v;
+            ages[b].0 += add;
             ages[b].1 += 1;
         }
     }
@@ -131,4 +132,24 @@ pub fn files_of_type(tree: &Tree, root: u32, ext: &str, show_hidden: bool) -> Ve
         }
     }
     out
+}
+
+/// Ids of every folder that has a file of type `ext` somewhere inside it (itself included).
+pub fn dirs_with_type(tree: &Tree, ext: &str, show_hidden: bool) -> std::collections::HashSet<u32> {
+    let mut set = std::collections::HashSet::new();
+    for (id, d) in tree.dirs.iter().enumerate() {
+        let id = id as u32;
+        let has = d.files.iter().any(|f| {
+            let name = d.file_name(f);
+            !f.removed && (show_hidden || !name.starts_with('.')) && ext_of(&name) == ext
+        });
+        if !has || !tree.is_attached(id) {
+            continue;
+        }
+        let mut n = id;
+        while n != crate::NONE && set.insert(n) {
+            n = tree.get(n).parent;
+        }
+    }
+    set
 }

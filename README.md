@@ -35,7 +35,8 @@ the git history (`git show 0788f49:python/disklens.py`).
 | Copies | Files with identical contents; mark extra copies and move them to the Trash |
 
 On the Types tab, double-click a type (or right-click → Show Files) to list only that type's
-files on the Biggest tab; a banner offers Show All Types. Right-click → Move All to Trash… moves
+files on the Biggest tab; a banner offers Show All Types. While the filter is on, the Folder tab shows
+only that type's files and the folders that contain some, so you can browse down to them. Right-click → Move All to Trash… moves
 every file of that type in the current folder and its subfolders to the Trash, after asking.
 
 Cut, Copy and Paste (right-click, or Ctrl+X / Ctrl+C / Ctrl+V) move and copy files between folders.

@@ -87,12 +87,33 @@ impl State {
             Some((key, desc)) => {
                 self.ui.pages.banner.set_title(&format!("Showing only {desc} files ({key})"));
                 self.ui.pages.banner.set_revealed(true);
+                self.ui.folder_banner.set_title(&format!("Showing only {desc} files ({key}) and the folders that contain them"));
+                self.ui.folder_banner.set_revealed(true);
             }
-            None => self.ui.pages.banner.set_revealed(false),
+            None => {
+                self.ui.pages.banner.set_revealed(false);
+                self.ui.folder_banner.set_revealed(false);
+            }
         }
         *self.type_filter.borrow_mut() = filter;
+        self.refresh_type_rows();
         self.stats_dirty.set(true);
         self.refresh_stats(true);
+    }
+
+    /// Recompute which folders hold the filtered type (the filter changed, or a scan ended)
+    /// and re-filter the Folder list.
+    pub(super) fn refresh_type_rows(&self) {
+        let new = self.type_filter.borrow().as_ref().map(|(key, _)| {
+            let tree = self.tree.borrow();
+            (key.clone(), stats::dirs_with_type(&tree, key, self.show_hidden.get()))
+        });
+        if new.is_none() && self.type_rows.borrow().is_none() {
+            return;
+        }
+        *self.type_rows.borrow_mut() = new;
+        self.ui.type_row_filter.changed(gtk::FilterChange::Different);
+        self.update_search_count();
     }
 
     /// Move every file of type `key` under the current folder to the Trash, after asking.

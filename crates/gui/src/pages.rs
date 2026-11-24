@@ -19,6 +19,8 @@ pub struct ListPage {
     pub view: gtk::ColumnView,
     pub sorted: gtk::SortListModel,
     summary: gtk::Label,
+    /// The summary without the search note.
+    base_summary: std::cell::RefCell<String>,
     store: gio::ListStore,
     /// Columns hidden in narrow windows.
     pub narrow_hide: Vec<gtk::ColumnViewColumn>,
@@ -101,7 +103,7 @@ impl ListPage {
         widget.append(&scroll);
         let store = gio::ListStore::new::<RowObject>();
         sorted.set_model(Some(&store));
-        ListPage { widget, view, sorted, summary, store, narrow_hide }
+        ListPage { widget, view, sorted, summary, base_summary: Default::default(), store, narrow_hide }
     }
 
     /// Every row on this page (before searching/sorting).
@@ -117,7 +119,17 @@ impl ListPage {
 
     fn set_rows(&self, rows: &[RowObject], summary: &str) {
         self.store.splice(0, self.store.n_items(), rows);
+        *self.base_summary.borrow_mut() = summary.to_string();
         self.summary.set_label(summary);
+    }
+
+    /// While searching, say how many of the rows the search shows (`None` = not searching).
+    pub fn set_search_note(&self, shown: Option<u32>) {
+        let base = self.base_summary.borrow();
+        match shown {
+            Some(n) => self.summary.set_label(&format!("{base} Your search shows {} of {}.", fmt_int(n as u64), fmt_int(self.store.n_items() as u64))),
+            None => self.summary.set_label(&base),
+        }
     }
 }
 
@@ -186,7 +198,7 @@ impl Pages {
             })
             .collect();
         let top_sum: u64 = rows.iter().map(|r| r.size()).sum();
-        let pct = if st.total > 0 { top_sum as f64 * 100.0 / st.total as f64 } else { 0.0 };
+        let pct = if st.total > 0 { (top_sum as f64 * 100.0 / st.total as f64).min(100.0) } else { 0.0 };
         let (nfiles, all_size) = match only {
             Some((ext, _)) => st.exts.get(ext).map(|e| (e.count, e.size)).unwrap_or((0, 0)),
             None => (st.exts.values().map(|e| e.count).sum(), st.total),
