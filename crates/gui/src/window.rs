@@ -65,6 +65,8 @@ pub struct Ui {
     /// Between the folder's rows and the sorter: hides rows that don't match the search.
     contents_filter: gtk::FilterListModel,
     name_filter: gtk::CustomFilter,
+    type_row_filter: gtk::CustomFilter,
+    folder_banner: adw::Banner,
     search_bar: gtk::SearchBar,
     search_entry: gtk::SearchEntry,
     search_count: gtk::Label,
@@ -144,6 +146,8 @@ pub struct State {
     fatal: RefCell<Option<String>>,
     /// Biggest tab limited to one file type: (extension key, description).
     type_filter: RefCell<Option<(String, String)>>,
+    /// The same filter as the Folder list sees it: the key and the folders holding that type.
+    type_rows: Rc<RefCell<Option<(String, std::collections::HashSet<u32>)>>>,
     /// The type a Types-tab context menu is open for.
     ctx_type: RefCell<Option<(String, String)>>,
 }
@@ -301,7 +305,23 @@ pub fn build(app: &adw::Application) -> Rc<State> {
         let Some(r) = obj.downcast_ref::<RowObject>() else { return true };
         r.sort_name().contains(q.as_str()) || r.detail().to_lowercase().contains(q.as_str())
     });
-    let contents_filter = gtk::FilterListModel::new(None::<gio::ListModel>, Some(name_filter.clone()));
+    // Types filter on the Folder tab: files of one type, and folders that contain some
+    let type_rows: Rc<RefCell<Option<(String, std::collections::HashSet<u32>)>>> = Rc::new(RefCell::new(None));
+    let tr = type_rows.clone();
+    let type_row_filter = gtk::CustomFilter::new(move |obj| {
+        let t = tr.borrow();
+        let (Some((key, dirs)), Some(r)) = (t.as_ref(), obj.downcast_ref::<RowObject>()) else { return true };
+        if r.is_dir() {
+            dirs.contains(&r.dir())
+        } else {
+            ext_of(&r.name()) == *key
+        }
+    });
+    let both = gtk::EveryFilter::new();
+    both.append(name_filter.clone());
+    both.append(type_row_filter.clone());
+    let contents_filter = gtk::FilterListModel::new(None::<gio::ListModel>, Some(both));
+    let folder_banner = adw::Banner::builder().button_label("Show All Types").action_name("win.type-filter-clear").build();
     let contents_sort = gtk::SortListModel::new(Some(contents_filter.clone()), contents_view.sorter());
     contents_view.set_model(Some(&gtk::MultiSelection::new(Some(contents_sort.clone()))));
     add_contents_columns(&contents_view);
@@ -313,6 +333,7 @@ pub fn build(app: &adw::Application) -> Rc<State> {
     contents_scroll.set_margin_end(12);
     contents_scroll.set_margin_bottom(12);
     let contents_page = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    contents_page.append(&folder_banner);
     contents_page.append(&header);
     contents_page.append(&contents_scroll);
 
@@ -426,6 +447,8 @@ pub fn build(app: &adw::Application) -> Rc<State> {
         contents_sort,
         contents_filter,
         name_filter,
+        type_row_filter,
+        folder_banner,
         search_bar,
         search_entry,
         search_count,
@@ -477,6 +500,7 @@ pub fn build(app: &adw::Application) -> Rc<State> {
         remote: RefCell::new(None),
         fatal: RefCell::new(None),
         type_filter: RefCell::new(None),
+        type_rows,
         ctx_type: RefCell::new(None),
     });
     wire(&state, &drive_pop);
@@ -1127,6 +1151,7 @@ impl State {
             // (a rescan, or the one after Undo) could end before Biggest/Types/Ages caught up
             self.stats_dirty.set(true);
             self.refresh_stats(true);
+            self.refresh_type_rows();
             self.remember_remote();
             self.show_fatal();
             return glib::ControlFlow::Break;
@@ -1258,6 +1283,10 @@ impl State {
             _ => String::new(),
         };
         self.ui.search_count.set_label(&text);
+        let searching = !self.query.borrow().is_empty();
+        for page in [&self.ui.pages.biggest, &self.ui.pages.types] {
+            page.set_search_note(searching.then(|| page.sorted.n_items()));
+        }
     }
 
     /// The tree or the view options changed: repaint the treemap if it's showing.

@@ -35,7 +35,8 @@ the git history (`git show 0788f49:python/disklens.py`).
 | Copies | Files with identical contents; mark extra copies and move them to the Trash |
 
 On the Types tab, double-click a type (or right-click → Show Files) to list only that type's
-files on the Biggest tab; a banner offers Show All Types. Right-click → Move All to Trash… moves
+files on the Biggest tab; a banner offers Show All Types. While the filter is on, the Folder tab shows
+only that type's files and the folders that contain some, so you can browse down to them. Right-click → Move All to Trash… moves
 every file of that type in the current folder and its subfolders to the Trash, after asking.
 
 Cut, Copy and Paste (right-click, or Ctrl+X / Ctrl+C / Ctrl+V) move and copy files between folders.
@@ -73,7 +74,8 @@ One-time setup on a Synology:
    without asking for a password.
 
 Shares are under `/volume1/<share>`. NAS scans are read-only: Open, Show in File Manager,
-Terminal, Move to Trash and Find Copies are off, because they'd act on this computer.
+Terminal and Move to Trash are off, because they'd act on this computer. The Copies tab works: the
+files are compared on the NAS itself (with its `sha256sum`), so nothing is downloaded.
 Copy Path copies `host:/path`. F5 rescans a folder over SSH. The last NAS that scanned
 successfully is listed on the start page. `disklens-scan USER@HOST:/PATH` does the same from a terminal.
 

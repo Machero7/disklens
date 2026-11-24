@@ -471,6 +471,7 @@ impl State {
             self.remove_from_views(*t);
         }
         self.dups_prune();
+        self.refresh_type_rows();
         self.sync_views();
         self.update_status(true);
 
