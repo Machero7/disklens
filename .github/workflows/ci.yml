@@ -1,0 +1,25 @@
+# Build DiskLens and run its tests on every pull request and on main.
+# Runs in a Fedora container because the app needs GTK 4.18 and libadwaita 1.6,
+# which are newer than what the Ubuntu runners ship.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - name: Install build tools and libraries
+        run: dnf -y install git gcc pkgconf-pkg-config rust cargo gtk4-devel libadwaita-devel findutils coreutils
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cargo build --workspace --locked
+      - name: Test
+        run: cargo test --workspace --locked
