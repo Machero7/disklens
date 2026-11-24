@@ -9,6 +9,7 @@
 pub mod dups;
 pub mod fileops;
 pub mod remote;
+pub mod remote_dups;
 pub mod scan;
 pub mod stats;
 pub mod trash;

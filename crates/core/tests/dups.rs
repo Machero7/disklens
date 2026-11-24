@@ -84,3 +84,31 @@ fn cancel_returns_nothing() {
     p.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
     assert!(dups::find(dups::collect(&tree, Tree::ROOT, 0, true), 2, &p).is_empty());
 }
+
+/// The NAS finder (run on this machine through `sh`, as the SSH command would be on the NAS)
+/// must find exactly the same groups as the local one, including awkward file names.
+#[test]
+fn remote_finder_matches_local() {
+    let t = tempfile::tempdir().unwrap();
+    fixture(t.path());
+    let r = t.path();
+    // names with spaces, quotes, a newline and a leading dash
+    let odd = pattern(200_000, 42);
+    fs::create_dir_all(r.join("odd dir")).unwrap();
+    for name in ["odd dir/it's \"quoted\".bin", "odd dir/new\nline.bin", "odd dir/-dash.bin"] {
+        fs::write(r.join(name), &odd).unwrap();
+    }
+    let (tree, _) = scan_blocking(r, ScanOptions::default()).unwrap();
+    let local = dups::find(dups::collect(&tree, Tree::ROOT, 0, true), 4, &Progress::default());
+    let p = Progress::default();
+    let remote = disklens_core::remote_dups::find(None, dups::collect(&tree, Tree::ROOT, 0, true), &p).unwrap();
+    let show = |gs: &[dups::Group]| -> Vec<(u64, Vec<String>)> { gs.iter().map(|g| (g.size, names(&tree, g))).collect() };
+    assert_eq!(show(&remote), show(&local));
+    assert_eq!(remote.len(), 4, "copies, small pair, tiny pair, odd names");
+    assert_eq!(p.errors.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+    // stopping returns nothing
+    let p = Progress::default();
+    p.cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert!(disklens_core::remote_dups::find(None, dups::collect(&tree, Tree::ROOT, 0, true), &p).unwrap().is_empty());
+}

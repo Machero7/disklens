@@ -16,7 +16,7 @@ use super::actions::{self, Target};
 use super::State;
 use crate::dupitem::DupItem;
 
-const REMOTE_TEXT: &str = "Finding copies compares file contents, so it works on folders on this computer, not on NAS scans.";
+const REMOTE_TEXT: &str = "Finds files with identical contents in the folder you're viewing, including its subfolders. The comparing runs on the NAS itself. NAS scans are read-only, so delete extra copies on the NAS.";
 const IDLE_TEXT: &str = "Finds files with identical contents in the folder you're viewing, including its subfolders.";
 
 pub struct DupUi {
@@ -242,11 +242,7 @@ impl State {
             p.cancel.store(true, Ordering::Relaxed);
         }
         self.ui.dups.root.remove_all();
-        // comparing contents would mean downloading every file from the NAS
-        let remote = self.is_remote();
-        self.ui.dups.find_btn.set_sensitive(!remote);
-        self.ui.dups.min_spin.set_sensitive(!remote);
-        self.ui.dups.summary.set_label(if remote { REMOTE_TEXT } else { IDLE_TEXT });
+        self.ui.dups.summary.set_label(if self.is_remote() { REMOTE_TEXT } else { IDLE_TEXT });
         self.dups_update_buttons();
         self.dups_update_where();
     }
@@ -262,10 +258,6 @@ impl State {
         }
         if self.is_scanning() {
             self.toast("Wait for the scan to finish before looking for duplicates");
-            return;
-        }
-        if self.is_remote() {
-            self.toast("Finding copies reads every file's contents, so it only works on folders on this computer");
             return;
         }
         let min = (self.ui.dups.min_spin.value() * 1024.0 * 1024.0) as u64;
@@ -284,15 +276,28 @@ impl State {
         let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 8);
         let (tx, rx) = std::sync::mpsc::channel();
         let pw = p.clone();
+        // on a NAS scan the checksums are computed on the NAS, over SSH
+        let host = self.remote.borrow().as_ref().map(|r| r.host.clone());
         std::thread::spawn(move || {
-            let _ = tx.send(dups::find(cands, threads, &pw));
+            let _ = tx.send(match host {
+                Some(h) => disklens_core::remote_dups::find(h.as_deref(), cands, &pw),
+                None => Ok(dups::find(cands, threads, &pw)),
+            });
         });
         let w = Rc::downgrade(self);
         glib::timeout_add_local(Duration::from_millis(200), move || {
             let Some(st) = w.upgrade() else { return glib::ControlFlow::Break };
             match rx.try_recv() {
-                Ok(groups) => {
+                Ok(Ok(groups)) => {
                     st.dups_finished(groups, &p);
+                    glib::ControlFlow::Break
+                }
+                Ok(Err(msg)) => {
+                    p.cancel.store(true, Ordering::Relaxed); // shows "Stopped." rather than "No duplicates"
+                    st.dups_finished(Vec::new(), &p);
+                    let dlg = adw::AlertDialog::new(Some("Couldn't look for copies"), Some(&msg));
+                    dlg.add_response("ok", "_OK");
+                    dlg.present(Some(&st.ui.window));
                     glib::ControlFlow::Break
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
@@ -392,11 +397,21 @@ impl State {
         if errors > 0 {
             s.push_str(&format!(" · {} unreadable files skipped", fmt_int(errors)));
         }
+        if self.is_remote() && !groups.is_empty() {
+            s.push_str(" · read-only: delete extra copies on the NAS");
+        }
         self.ui.dups.summary.set_label(&s);
     }
 
     fn dups_update_buttons(&self) {
         let any = self.ui.dups.root.n_items() > 0;
+        // NAS scans are read-only: no marking and no trash, so hide those controls
+        let local = !self.is_remote();
+        self.ui.dups.mark_btns.set_visible(local);
+        self.ui.dups.trash_btn.set_visible(local);
+        if let Some(c) = self.ui.dups.view.columns().item(0).and_downcast::<gtk::ColumnViewColumn>() {
+            c.set_visible(local);
+        }
         self.ui.dups.mark_btns.set_sensitive(any);
         update_trash_button(&self.ui.dups.trash_btn, &self.ui.dups.root);
     }

@@ -74,7 +74,8 @@ One-time setup on a Synology:
    without asking for a password.
 
 Shares are under `/volume1/<share>`. NAS scans are read-only: Open, Show in File Manager,
-Terminal, Move to Trash and Find Copies are off, because they'd act on this computer.
+Terminal and Move to Trash are off, because they'd act on this computer. The Copies tab works: the
+files are compared on the NAS itself (with its `sha256sum`), so nothing is downloaded.
 Copy Path copies `host:/path`. F5 rescans a folder over SSH. The last NAS that scanned
 successfully is listed on the start page. `disklens-scan USER@HOST:/PATH` does the same from a terminal.
 
